@@ -579,6 +579,168 @@ describe("Console patch bootstrap / ensure", () => {
   });
 });
 
+describe("POST /command - screenshot", () => {
+  test("正常系: { dataUrl, byteCount } をそのまま返す", async () => {
+    let lastCommandScript = "";
+    const SAMPLE_DATA_URL =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("__bunmot_html2canvas")) {
+        lastCommandScript = script;
+        return { dataUrl: SAMPLE_DATA_URL, byteCount: 70 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    const res = await postCommand(bridge, {
+      type: "screenshot",
+      fullPage: true,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      success: true,
+      result: { dataUrl: SAMPLE_DATA_URL, byteCount: 70 },
+    });
+    expect(lastCommandScript).toContain("__bunmot_html2canvas");
+    bridge.stop();
+  });
+
+  test("fullPage 省略時は documentElement を target にする (true fallback)", async () => {
+    let lastCommandScript = "";
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("__bunmot_html2canvas")) {
+        lastCommandScript = script;
+        return { dataUrl: "data:image/png;base64,xxx", byteCount: 0 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    await postCommand(bridge, { type: "screenshot" });
+    expect(lastCommandScript).toContain("document.documentElement");
+    bridge.stop();
+  });
+
+  test("fullPage: false で document.body を target にする", async () => {
+    let lastCommandScript = "";
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("__bunmot_html2canvas")) {
+        lastCommandScript = script;
+        return { dataUrl: "data:image/png;base64,xxx", byteCount: 0 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    await postCommand(bridge, { type: "screenshot", fullPage: false });
+    expect(lastCommandScript).toContain("document.body");
+    bridge.stop();
+  });
+
+  test("WebView reject (SecurityError 等) → kind: evaluation_error", async () => {
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("__bunmot_html2canvas")) {
+        throw new Error("Tainted canvases may not be exported");
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    const res = await postCommand(bridge, { type: "screenshot" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      success: boolean;
+      error: { kind: string; message: string };
+    };
+    expect(body.success).toBe(false);
+    expect(body.error.kind).toBe("evaluation_error");
+    expect(body.error.message).toContain("Tainted");
+    bridge.stop();
+  });
+
+  test("command_received は dataUrl をログに含めず fullPage のみ記録", async () => {
+    process.env["BUN_MOT_LOG"] = "verbose";
+    const captured: string[] = [];
+    const original = console.log;
+    console.log = (msg: string): void => {
+      captured.push(msg);
+    };
+    try {
+      const SECRET_DATA_URL =
+        "data:image/png;base64,SECRETPAYLOADTHATSHOULDNOTBELOGGED";
+      const { view } = createMockView(async (script: string) => {
+        if (script.includes("__bunmot_html2canvas")) {
+          return { dataUrl: SECRET_DATA_URL, byteCount: 27 };
+        }
+        return undefined;
+      });
+      const bridge = setupBunMot(view, { port: 0 });
+      await postCommand(bridge, { type: "screenshot", fullPage: true });
+      const received = captured.find(
+        (l) => l.includes("command_received") && l.includes("type=screenshot"),
+      );
+      expect(received).toBeDefined();
+      expect(received ?? "").not.toContain("SECRETPAYLOADTHATSHOULDNOTBELOGGED");
+      expect(received ?? "").toContain("fullPage=true");
+      bridge.stop();
+    } finally {
+      console.log = original;
+      process.env["BUN_MOT_LOG"] = "silent";
+    }
+  });
+
+  test("screenshot_started / screenshot_completed ログイベントが発火する", async () => {
+    process.env["BUN_MOT_LOG"] = "verbose";
+    const captured: string[] = [];
+    const original = console.log;
+    console.log = (msg: string): void => {
+      captured.push(msg);
+    };
+    try {
+      const { view } = createMockView(async (script: string) => {
+        if (script.includes("__bunmot_html2canvas")) {
+          return { dataUrl: "data:image/png;base64,xxx", byteCount: 3 };
+        }
+        return undefined;
+      });
+      const bridge = setupBunMot(view, { port: 0 });
+      await postCommand(bridge, { type: "screenshot" });
+      const started = captured.find((l) => l.includes("screenshot_started"));
+      const completed = captured.find((l) => l.includes("screenshot_completed"));
+      expect(started).toBeDefined();
+      expect(completed).toBeDefined();
+      expect(completed ?? "").toContain("byteCount=3");
+      bridge.stop();
+    } finally {
+      console.log = original;
+      process.env["BUN_MOT_LOG"] = "silent";
+    }
+  });
+
+  test("WebView reject 時に screenshot_failed ログイベントが発火する", async () => {
+    process.env["BUN_MOT_LOG"] = "verbose";
+    const captured: string[] = [];
+    const original = console.log;
+    console.log = (msg: string): void => {
+      captured.push(msg);
+    };
+    try {
+      const { view } = createMockView(async (script: string) => {
+        if (script.includes("__bunmot_html2canvas")) {
+          throw new Error("Tainted canvases may not be exported");
+        }
+        return undefined;
+      });
+      const bridge = setupBunMot(view, { port: 0 });
+      await postCommand(bridge, { type: "screenshot" });
+      const failed = captured.find((l) => l.includes("screenshot_failed"));
+      expect(failed).toBeDefined();
+      expect(failed ?? "").toContain("kind=evaluation_error");
+      bridge.stop();
+    } finally {
+      console.log = original;
+      process.env["BUN_MOT_LOG"] = "silent";
+    }
+  });
+});
+
 describe("ログフィールド (機密保護)", () => {
   test("fill の command_received は value を含まず valueLength のみ記録", async () => {
     // logger をスパイ: console.log の出力を捕捉する。

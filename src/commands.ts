@@ -69,6 +69,19 @@ export const GetLogsRequestSchema = BaseRequestSchema.extend({
   type: z.literal("getLogs"),
 });
 
+export const ScreenshotRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("screenshot"),
+  // 既定 true (driver / bridge fallback)。ページ全体 (documentElement) か body だけかの切替。
+  fullPage: z.boolean().optional(),
+});
+
+export const ScreenshotResultSchema = z.object({
+  // bridge → driver は base64 dataURL のみ送る (path 解決は driver 側)。
+  dataUrl: z.string().regex(/^data:image\/png;base64,/),
+  // base64 デコード後のバイト数 (driver 側のサニティチェック用)。
+  byteCount: z.number().int().nonnegative(),
+});
+
 export const CommandRequestSchema = z.discriminatedUnion("type", [
   EvaluateRequestSchema,
   WaitForSelectorRequestSchema,
@@ -80,6 +93,7 @@ export const CommandRequestSchema = z.discriminatedUnion("type", [
   IsVisibleRequestSchema,
   GetAttributeRequestSchema,
   GetLogsRequestSchema,
+  ScreenshotRequestSchema,
 ]);
 
 export type CommandRequest = z.infer<typeof CommandRequestSchema>;
@@ -93,6 +107,8 @@ export type WaitForTextRequest = z.infer<typeof WaitForTextRequestSchema>;
 export type IsVisibleRequest = z.infer<typeof IsVisibleRequestSchema>;
 export type GetAttributeRequest = z.infer<typeof GetAttributeRequestSchema>;
 export type GetLogsRequest = z.infer<typeof GetLogsRequestSchema>;
+export type ScreenshotRequest = z.infer<typeof ScreenshotRequestSchema>;
+export type ScreenshotResult = z.infer<typeof ScreenshotResultSchema>;
 
 // §2.11: CommandType は CommandRequest["type"] から派生
 export type CommandType = CommandRequest["type"];

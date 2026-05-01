@@ -19,6 +19,7 @@ import {
   buildConsolePatchScript,
   buildEnsurePatchScript,
   buildGetLogsScript,
+  buildScreenshotScript,
 } from "./scripts";
 
 export interface SetupBunMotOptions {
@@ -129,17 +130,42 @@ async function handleHttpRequest(
   // §4.1: dispatchCommand 前に console patch を bootstrap / ensure する。
   await ensureConsolePatch(view, state);
 
+  // §plan §6.2: screenshot は固有ログを追加発火 (byteCount を可視化するため)。
+  if (cmd.type === "screenshot") {
+    log("screenshot_started", {
+      viewId: cmd.viewId,
+      fullPage: cmd.fullPage ?? true,
+    });
+  }
+
   const start = Date.now();
   try {
     const result = await dispatchCommand(cmd, view);
     const durationMs = Date.now() - start;
     log("command_completed", { type: cmd.type, success: true, durationMs });
+    if (cmd.type === "screenshot") {
+      const byteCount =
+        typeof result === "object" &&
+        result !== null &&
+        "byteCount" in result &&
+        typeof (result as { byteCount: unknown }).byteCount === "number"
+          ? (result as { byteCount: number }).byteCount
+          : -1;
+      log("screenshot_completed", {
+        viewId: cmd.viewId,
+        byteCount,
+        durationMs,
+      });
+    }
     return jsonResponse(200, { success: true, result });
   } catch (e) {
     const { kind, message } = mapErrorToKind(e);
     const durationMs = Date.now() - start;
     log("command_completed", { type: cmd.type, success: false, durationMs, kind });
     log("command_failed", { type: cmd.type, kind, message });
+    if (cmd.type === "screenshot") {
+      log("screenshot_failed", { viewId: cmd.viewId, kind, message });
+    }
     return jsonResponse(200, { success: false, error: { kind, message } });
   }
 }
@@ -171,8 +197,8 @@ async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise
 
 function commandReceivedFields(
   cmd: CommandRequest,
-): Record<string, string | number | undefined> {
-  const base: Record<string, string | number | undefined> = {
+): Record<string, string | number | boolean | undefined> {
+  const base: Record<string, string | number | boolean | undefined> = {
     type: cmd.type,
     viewId: cmd.viewId,
   };
@@ -214,6 +240,10 @@ function commandReceivedFields(
       break;
     case "getLogs":
       // 追加フィールドなし
+      break;
+    case "screenshot":
+      // dataUrl はサイズ・機密の双方の理由でログに出さない (§plan §6.2)。
+      base["fullPage"] = cmd.fullPage ?? true;
       break;
   }
   return base;
@@ -263,6 +293,8 @@ function buildScriptForCommand(cmd: CommandRequest): string {
       return buildGetAttributeScript(cmd.selector, cmd.attribute);
     case "getLogs":
       return buildGetLogsScript();
+    case "screenshot":
+      return buildScreenshotScript({ fullPage: cmd.fullPage ?? true });
   }
 }
 

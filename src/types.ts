@@ -1,5 +1,9 @@
 // 共通型エイリアス。CommandType は commands.ts で CommandRequest["type"] から派生させる。
 
+import type { ScreenshotResult as ScreenshotResultType } from "./commands";
+// screenshot の wire result 型は commands.ts の Zod schema から導出 (二重定義を避ける)。
+export type { ScreenshotResult } from "./commands";
+
 export type ErrorKind =
   | "validation_error"
   | "timeout"
@@ -111,5 +115,16 @@ export function isGetLogsResult(value: unknown): value is GetLogsResult {
   if (!v.entries.every(isConsoleLogEntry)) return false;
   if (typeof v.droppedCount !== "number") return false;
   if (typeof v.patchMissing !== "boolean") return false;
+  return true;
+}
+
+// screenshot の wire result type guard。dataUrl は "data:image/png;base64,..." 固定 (v1)。
+export function isScreenshotResult(value: unknown): value is ScreenshotResultType {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as { dataUrl?: unknown; byteCount?: unknown };
+  if (typeof v.dataUrl !== "string") return false;
+  if (!/^data:image\/png;base64,/.test(v.dataUrl)) return false;
+  if (typeof v.byteCount !== "number") return false;
+  if (!Number.isInteger(v.byteCount) || v.byteCount < 0) return false;
   return true;
 }

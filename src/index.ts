@@ -1,5 +1,10 @@
 export { BunMot, BunMotScopedView } from "./driver";
-export type { BunMotOptions, BunMotCommands } from "./driver";
+export type {
+  BunMotOptions,
+  BunMotCommands,
+  ScreenshotOptions,
+  ScreenshotReturn,
+} from "./driver";
 export { launch } from "./launch";
 export type {
   LaunchOptions,
@@ -29,4 +34,5 @@ export type {
   FillResult,
   WaitForHiddenResult,
   WaitForTextResult,
+  ScreenshotResult,
 } from "./types";

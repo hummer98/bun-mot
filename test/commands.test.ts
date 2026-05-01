@@ -13,9 +13,12 @@ import {
   IsVisibleRequestSchema,
   GetAttributeRequestSchema,
   GetLogsRequestSchema,
+  ScreenshotRequestSchema,
+  ScreenshotResultSchema,
   BaseRequestSchema,
 } from "../src/commands";
 import type { CommandRequest, CommandResponse, CommandType } from "../src/commands";
+import { isScreenshotResult } from "../src/types";
 
 describe("CommandRequestSchema", () => {
   test("evaluate コマンドをパースできる", () => {
@@ -176,7 +179,7 @@ describe("CommandResponseSchema", () => {
 });
 
 describe("型導出", () => {
-  test("CommandType は CommandRequest['type'] から派生される (10 種)", () => {
+  test("CommandType は CommandRequest['type'] から派生される (11 種)", () => {
     // コンパイル時の型チェックを実行時で確認
     const valid: CommandType[] = [
       "evaluate",
@@ -189,6 +192,7 @@ describe("型導出", () => {
       "isVisible",
       "getAttribute",
       "getLogs",
+      "screenshot",
     ];
     expect(valid).toEqual([
       "evaluate",
@@ -201,6 +205,7 @@ describe("型導出", () => {
       "isVisible",
       "getAttribute",
       "getLogs",
+      "screenshot",
     ]);
   });
 
@@ -435,5 +440,137 @@ describe("GetLogsRequestSchema", () => {
 describe("ErrorKindSchema (拡張)", () => {
   test("element_not_interactable を含む", () => {
     expect(ErrorKindSchema.safeParse("element_not_interactable").success).toBe(true);
+  });
+});
+
+describe("ScreenshotRequestSchema", () => {
+  test("fullPage 省略でパースできる", () => {
+    const parsed = ScreenshotRequestSchema.parse({ type: "screenshot" });
+    expect(parsed.type).toBe("screenshot");
+    expect(parsed.fullPage).toBeUndefined();
+  });
+
+  test("fullPage: true でパースできる", () => {
+    const parsed = ScreenshotRequestSchema.parse({
+      type: "screenshot",
+      fullPage: true,
+    });
+    expect(parsed.fullPage).toBe(true);
+  });
+
+  test("fullPage: false でパースできる", () => {
+    const parsed = ScreenshotRequestSchema.parse({
+      type: "screenshot",
+      fullPage: false,
+    });
+    expect(parsed.fullPage).toBe(false);
+  });
+
+  test("fullPage が boolean でないと fail", () => {
+    const r = ScreenshotRequestSchema.safeParse({
+      type: "screenshot",
+      fullPage: "yes",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  test("viewId optional", () => {
+    const parsed = ScreenshotRequestSchema.parse({
+      type: "screenshot",
+      viewId: "main",
+    });
+    expect(parsed.viewId).toBe("main");
+  });
+
+  test("CommandRequestSchema 経由でも screenshot をパースできる", () => {
+    const parsed = CommandRequestSchema.parse({
+      type: "screenshot",
+      fullPage: true,
+    });
+    expect(parsed.type).toBe("screenshot");
+    if (parsed.type === "screenshot") {
+      expect(parsed.fullPage).toBe(true);
+    }
+  });
+});
+
+describe("ScreenshotResultSchema", () => {
+  test("正常な dataUrl + byteCount をパースできる", () => {
+    const parsed = ScreenshotResultSchema.parse({
+      dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+      byteCount: 8,
+    });
+    expect(parsed.dataUrl).toContain("data:image/png;base64,");
+    expect(parsed.byteCount).toBe(8);
+  });
+
+  test("dataUrl の prefix が違うと fail", () => {
+    const r = ScreenshotResultSchema.safeParse({
+      dataUrl: "data:image/jpeg;base64,xxx",
+      byteCount: 0,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  test("byteCount が負数で fail", () => {
+    const r = ScreenshotResultSchema.safeParse({
+      dataUrl: "data:image/png;base64,xxx",
+      byteCount: -1,
+    });
+    expect(r.success).toBe(false);
+  });
+
+  test("byteCount が小数で fail", () => {
+    const r = ScreenshotResultSchema.safeParse({
+      dataUrl: "data:image/png;base64,xxx",
+      byteCount: 1.5,
+    });
+    expect(r.success).toBe(false);
+  });
+});
+
+describe("isScreenshotResult", () => {
+  test("正常 shape で true", () => {
+    expect(
+      isScreenshotResult({
+        dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        byteCount: 8,
+      }),
+    ).toBe(true);
+  });
+
+  test("dataUrl prefix が違うと false (jpeg)", () => {
+    expect(
+      isScreenshotResult({
+        dataUrl: "data:image/jpeg;base64,xxx",
+        byteCount: 0,
+      }),
+    ).toBe(false);
+  });
+
+  test("byteCount が負で false", () => {
+    expect(
+      isScreenshotResult({
+        dataUrl: "data:image/png;base64,xxx",
+        byteCount: -1,
+      }),
+    ).toBe(false);
+  });
+
+  test("byteCount 欠落で false", () => {
+    expect(
+      isScreenshotResult({ dataUrl: "data:image/png;base64,xxx" }),
+    ).toBe(false);
+  });
+
+  test("dataUrl が string でないと false", () => {
+    expect(isScreenshotResult({ dataUrl: 1, byteCount: 0 })).toBe(false);
+  });
+
+  test("null / undefined / 非 object で false", () => {
+    expect(isScreenshotResult(null)).toBe(false);
+    expect(isScreenshotResult(undefined)).toBe(false);
+    expect(isScreenshotResult("data:image/png;base64,x")).toBe(false);
+    expect(isScreenshotResult(42)).toBe(false);
   });
 });

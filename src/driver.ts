@@ -1,5 +1,8 @@
+import { promises as fsp } from "node:fs";
+import { Buffer } from "node:buffer";
 import { BunMotClient } from "./client";
 import { BunMotError } from "./errors";
+import { log } from "./logger";
 import {
   isClickResult,
   isFillResult,
@@ -7,12 +10,29 @@ import {
   isGetLogsResult,
   isGetTextResult,
   isIsVisibleResult,
+  isScreenshotResult,
   isWaitForHiddenResult,
   isWaitForSelectorResult,
   isWaitForTextResult,
 } from "./types";
 import type { ConsoleLogEntry, EvaluateResult } from "./types";
 import type { CommandRequest, TextMatcher } from "./commands";
+
+export interface ScreenshotOptions {
+  /**
+   * `true` (default): document.documentElement (フルページ) を撮影。
+   * `false`: document.body のみ。
+   * 将来用に予約: `selector` (要素単位)、`type` ("png" | "jpeg")、`quality` (jpeg) は v1 では未サポート。
+   */
+  fullPage?: boolean;
+}
+
+// Playwright と異なり、`path` は第 1 引数の string で渡す (option-bag ではない)。
+// path 指定時はファイルに書き出して { path, byteCount } を返し、
+// 省略時は { buffer, byteCount } を返す。
+export type ScreenshotReturn =
+  | { buffer: Buffer; byteCount: number }
+  | { path: string; byteCount: number };
 
 export interface BunMotOptions {
   port: number;
@@ -228,6 +248,54 @@ export class BunMot implements BunMotCommands {
       );
     }
     return result.value;
+  }
+
+  // Playwright 互換: path を省略すると Buffer を返す、指定するとファイルに書き出す。
+  // 注: Playwright の `page.screenshot()` は options.path 形式だが、bun-mot は第 1 引数 string。
+  async screenshot(): Promise<{ buffer: Buffer; byteCount: number }>;
+  async screenshot(
+    path: string,
+    options?: ScreenshotOptions,
+  ): Promise<{ path: string; byteCount: number }>;
+  async screenshot(
+    path?: string,
+    options?: ScreenshotOptions,
+  ): Promise<ScreenshotReturn> {
+    const fullPage = options?.fullPage ?? true;
+    const result = await sendCommand(
+      this.client,
+      { type: "screenshot", fullPage },
+      this.viewId,
+    );
+    if (!isScreenshotResult(result)) {
+      throw new BunMotError(
+        `screenshot: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+    const base64 = result.dataUrl.replace(/^data:image\/png;base64,/, "");
+    const buffer = Buffer.from(base64, "base64");
+    // wire の byteCount はサニティチェックのみ。driver は常に buffer.byteLength を返す。
+    // 値が極端に異なる (倍以上 / 半分以下) なら warn を残す (throw しない)。
+    if (
+      result.byteCount > 0 &&
+      (result.byteCount > buffer.byteLength * 2 ||
+        buffer.byteLength > result.byteCount * 2)
+    ) {
+      log("screenshot_bytecount_mismatch", {
+        wireByteCount: result.byteCount,
+        decodedByteCount: buffer.byteLength,
+      });
+    }
+    if (path !== undefined) {
+      // path === "" は Playwright と同様 fs.writeFile が ENOENT で raw throw する。
+      // bun-mot 側でガードしないのは「意図しない使い方」を呼び出し側責務にする方針。
+      await fsp.writeFile(path, buffer);
+      log("screenshot_saved", { path, byteCount: buffer.byteLength });
+      return { path, byteCount: buffer.byteLength };
+    }
+    log("screenshot_returned_buffer", { byteCount: buffer.byteLength });
+    return { buffer, byteCount: buffer.byteLength };
   }
 
   async getLogs(): Promise<ConsoleLogEntry[]> {

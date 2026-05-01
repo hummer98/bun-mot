@@ -12,6 +12,7 @@ import {
   buildConsolePatchScript,
   buildEnsurePatchScript,
   buildGetLogsScript,
+  buildScreenshotScript,
 } from "../src/scripts";
 
 describe("buildEvaluateScript", () => {
@@ -372,5 +373,62 @@ describe("buildGetLogsScript", () => {
 
   test("script が構文エラーにならない", () => {
     expect(() => new Function(buildGetLogsScript())).not.toThrow();
+  });
+});
+
+describe("buildScreenshotScript", () => {
+  test("fullPage: true で document.documentElement を target にする", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain("document.documentElement");
+  });
+
+  test("fullPage: false で document.body を target にする", () => {
+    const script = buildScreenshotScript({ fullPage: false });
+    expect(script).toContain("document.body");
+  });
+
+  test("html2canvas の inject ガード (__bunmot_html2canvas) を含む", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain("__bunmot_html2canvas");
+  });
+
+  test("toDataURL('image/png') を呼ぶ", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain('toDataURL("image/png")');
+  });
+
+  test("dataUrl と byteCount を含む object を resolve する", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain("dataUrl");
+    expect(script).toContain("byteCount");
+  });
+
+  test("async IIFE 形式 (Promise を返す式)", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain("async");
+  });
+
+  test("wrapper 部分にポーリング (setInterval / setTimeout) を含まない", () => {
+    // 注: html2canvas 本体は内部で setTimeout を使うため除外して wrapper だけ確認する。
+    // bun-mot 側のコードはポーリング禁止 (CLAUDE.md)、await Promise でのみ完結することを保証。
+    const script = buildScreenshotScript({ fullPage: true });
+    const marker = "window.__bunmot_html2canvas = window.html2canvas;";
+    const wrapperStart = script.indexOf(marker);
+    expect(wrapperStart).toBeGreaterThan(0);
+    const wrapper = script.slice(wrapperStart);
+    expect(wrapper).not.toMatch(/setInterval/);
+    expect(wrapper).not.toMatch(/setTimeout/);
+  });
+
+  test("html2canvas オプション (logging:false, useCORS:true) を含む", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    expect(script).toContain("logging");
+    expect(script).toContain("useCORS");
+  });
+
+  test("html2canvas のソースが埋め込まれている (47KB 級の大文字列)", () => {
+    const script = buildScreenshotScript({ fullPage: true });
+    // bundle 自体は大きい (10KB 以上を保守的に確認)
+    expect(script.length).toBeGreaterThan(10_000);
   });
 });

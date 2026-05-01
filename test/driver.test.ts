@@ -8,6 +8,9 @@ import {
   BunMotSelectorNotFoundError,
   BunMotTimeoutError,
 } from "../src/errors";
+import { promises as fsp } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 beforeAll(() => {
   process.env["BUN_MOT_LOG"] = "silent";
@@ -26,6 +29,7 @@ type CapturedRequest = {
   value?: string;
   attribute?: string;
   text?: { kind: string; value?: string; source?: string; flags?: string };
+  fullPage?: boolean;
 };
 
 interface BridgeHarness {
@@ -596,6 +600,180 @@ describe("BunMot - 新コマンドでも viewId が伝搬される", () => {
     const mot = new BunMot({ port: harness.port, viewId: "v3" });
     await mot.getLogs();
     expect(harness.receivedRequests[0]?.viewId).toBe("v3");
+    harness.stop();
+  });
+});
+
+describe("BunMot.screenshot", () => {
+  // 1×1 red pixel PNG (base64)。bridge mock が返す既知の有効な dataURL。
+  const SAMPLE_PNG_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+  const SAMPLE_DATA_URL = `data:image/png;base64,${SAMPLE_PNG_BASE64}`;
+  // PNG の magic number (89 50 4E 47)
+  const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+
+  test("path 省略時: { buffer, byteCount } を返す。buffer は PNG signature を持つ", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const result = await mot.screenshot();
+    if ("buffer" in result) {
+      expect(result.buffer).toBeInstanceOf(Buffer);
+      expect(result.buffer.byteLength).toBe(result.byteCount);
+      expect(result.buffer.subarray(0, 4)).toEqual(PNG_SIGNATURE);
+    } else {
+      throw new Error("expected { buffer, byteCount } result");
+    }
+    expect(harness.receivedRequests[0]).toMatchObject({
+      type: "screenshot",
+      fullPage: true,
+    });
+    harness.stop();
+  });
+
+  test("path 指定時: ファイルに書き出して { path, byteCount } を返す", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const path = join(
+      tmpdir(),
+      `bun-mot-screenshot-test-${Date.now()}-${Math.random().toString(36).slice(2)}.png`,
+    );
+    try {
+      const result = await mot.screenshot(path);
+      if ("path" in result) {
+        expect(result.path).toBe(path);
+        expect(result.byteCount).toBeGreaterThan(0);
+      } else {
+        throw new Error("expected { path, byteCount } result");
+      }
+      // ファイルの内容を読み戻して PNG signature を確認
+      const fileBuffer = await fsp.readFile(path);
+      expect(fileBuffer.byteLength).toBe(result.byteCount);
+      expect(fileBuffer.subarray(0, 4)).toEqual(PNG_SIGNATURE);
+    } finally {
+      await fsp.rm(path, { force: true });
+      harness.stop();
+    }
+  });
+
+  test("fullPage: false がリクエストに伝搬される", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const path = join(tmpdir(), `bun-mot-screenshot-test-fp-${Date.now()}.png`);
+    try {
+      await mot.screenshot(path, { fullPage: false });
+      expect(harness.receivedRequests[0]?.fullPage).toBe(false);
+    } finally {
+      await fsp.rm(path, { force: true });
+      harness.stop();
+    }
+  });
+
+  test("path 省略 + fullPage 省略でも fullPage: true がリクエストに乗る", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.screenshot();
+    expect(harness.receivedRequests[0]?.fullPage).toBe(true);
+    harness.stop();
+  });
+
+  test("viewId 配線: リクエスト body に viewId が乗る", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port, viewId: "screenshot-view" });
+    await mot.screenshot();
+    expect(harness.receivedRequests[0]?.viewId).toBe("screenshot-view");
+    harness.stop();
+  });
+
+  test("予期せぬ shape (dataUrl 欠落) で BunMotError(internal_error)", async () => {
+    const harness = await startCapturingBridge(async () => ({ byteCount: 0 }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.screenshot();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotError);
+    if (caught instanceof BunMotError) {
+      expect(caught.kind).toBe("internal_error");
+      expect(caught.message).toContain("screenshot:");
+    }
+    harness.stop();
+  });
+
+  test("evaluation_error → BunMotError(evaluation_error) が throw", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: {
+        kind: "evaluation_error",
+        message: "Tainted canvases may not be exported",
+      },
+    }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.screenshot();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotError);
+    if (caught instanceof BunMotError) {
+      expect(caught.kind).toBe("evaluation_error");
+      expect(caught.message).toContain("Tainted");
+    }
+    harness.stop();
+  });
+
+  test("driver は常に buffer.byteLength を返す (wire の byteCount が誤っていても)", async () => {
+    // wire の byteCount を意図的に間違った値で返しても driver は再計算した正しい値を返す。
+    // 大きく異なる場合は warn ログを出す (throw しない)。
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 999999, // 嘘の値
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const result = await mot.screenshot();
+    if ("buffer" in result) {
+      expect(result.byteCount).toBe(result.buffer.byteLength);
+      expect(result.byteCount).not.toBe(999999);
+    } else {
+      throw new Error("expected buffer result");
+    }
+    harness.stop();
+  });
+
+  // path === "" は driver でガードしない (Playwright と同じく fs.writeFile に任せて raw throw)。
+  // ENOENT や類似のエラーになるが、これは意図しない使い方として呼び出し側責務とする。
+  test("path に空文字 \"\" を渡すと fs.writeFile の raw error が throw される", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      dataUrl: SAMPLE_DATA_URL,
+      byteCount: 70,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.screenshot("");
+    } catch (e) {
+      caught = e;
+    }
+    // BunMotError ではなく fs/Node の raw error
+    expect(caught).toBeDefined();
+    expect(caught).not.toBeInstanceOf(BunMotError);
     harness.stop();
   });
 });

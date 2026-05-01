@@ -4,6 +4,11 @@
 
 import type { TextMatcher } from "./commands";
 
+// Step 0 で確定した text import 戦略: Bun の attribute import (`with { type: "text" }`)。
+// バンドル本体 (~47KB) を起動時に文字列として読み込み、screenshot 命令時に WebView へ inject する。
+// フォールバック (`fs.readFileSync(require.resolve(...))`) は probe で第一候補が動いたため不要。
+import html2canvasSource from "html2canvas/dist/html2canvas.min.js" with { type: "text" };
+
 // MutationObserver の wait 系を組み立てる共通 helper。
 // predicateBody は要素が条件を満たすかチェックする JS 式。`el` は document.querySelector 結果 (null 含む)。
 // 戻り値は { found: true } のような result object を resolve する式 (resolveExpr) を埋め込む。
@@ -295,4 +300,29 @@ export function buildGetLogsScript(): string {
   const snap = buf.drain();
   resolve({ entries: snap.entries, droppedCount: snap.droppedCount, patchMissing: false });
 });`;
+}
+
+// §plan Step 2: html2canvas を inject して toDataURL("image/png") を取る IIFE を生成。
+// 冪等性は WebView 側 `window.__bunmot_html2canvas` 存在チェックで担保 (bridge state は増やさない)。
+// ポーリングしないこと: setInterval / setTimeout は使わず、html2canvas の Promise を await する。
+export function buildScreenshotScript(opts: { fullPage: boolean }): string {
+  const target = opts.fullPage ? "document.documentElement" : "document.body";
+  // html2canvasSource はライブラリ本体 (UMD)。eval すると window.html2canvas を立ち上げる。
+  // ソース内でのシングルクォート / バッククォートは UMD バンドルの構造を壊さないようそのまま埋め込む。
+  return `(async () => {
+  if (!window.__bunmot_html2canvas) {
+    ${html2canvasSource};
+    window.__bunmot_html2canvas = window.html2canvas;
+  }
+  const canvas = await window.__bunmot_html2canvas(${target}, {
+    logging: false,
+    useCORS: true,
+    allowTaint: false,
+    backgroundColor: null,
+  });
+  const dataUrl = canvas.toDataURL("image/png");
+  const PREFIX_LEN = "data:image/png;base64,".length;
+  const byteCount = Math.floor((dataUrl.length - PREFIX_LEN) * 3 / 4);
+  return { dataUrl: dataUrl, byteCount: byteCount };
+})()`;
 }
