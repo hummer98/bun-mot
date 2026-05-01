@@ -1,6 +1,6 @@
 {
   "name": "bun-mot",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "E2E testing driver for Electrobun apps. Playwright-compatible API for asserting on real WebView state via an HTTP bridge.",
   "license": "MIT",
   "author": "Yuji Yamamoto",
