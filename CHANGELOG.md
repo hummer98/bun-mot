@@ -5,9 +5,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `package.json.repository.url` を確定 (`https://github.com/hummer98/bun-mot.git`)
+- `mado` 連携 (`scripts/smoke-mado.ts`, `docs/mado-integration.md`, README §「mado 連携の実例」, `mado:smoke` script) を削除。bun-mot は単体プロジェクトとして公開
+- ルート `.gitignore` に `.team/` および `.worktrees/` を追加 (multi-agent orchestration の作業ディレクトリ)
+
 ### TODO (publish 前にユーザー確認)
 
-- `package.json.repository.url` を実 GitHub URL (`https://github.com/TBD/bun-mot.git` を確定値に置換) する
 - `npm view bun-mot` で名前衝突がないことを最終確認したうえで `npm publish` を実行する
 
 ## [0.1.0] - 2026-05-01
@@ -26,13 +31,11 @@
   - `files: ["dist", "README.md", "LICENSE", "CHANGELOG.md"]`
   - `engines.bun: ">=1.0.0"` (`engines.node` は意図的に未指定)
   - `publishConfig.access: "public"`
-  - scripts: `build` / `prepublishOnly` (`typecheck && test:unit && build`) / `test:unit` / `mado:smoke`
+  - scripts: `build` / `prepublishOnly` (`typecheck && test:unit && build`) / `test:unit`
 - `test/build/dist-shape.test.ts`: `dist/*.d.ts` に bun module の type import / triple-slash reference / `Bun.Subprocess` / `Server<` が現れないことを検証
 - `test/integration/prod-build.test.ts`: 動的 import + 環境変数ガードによる Bun bundler dead-code 除去を `bun build --target=bun` (minify なし) で実証
 - `test/fixtures/prod-build/`: 上記検証用の最小エントリ
-- `scripts/smoke-mado.ts`: `MADO_DIR` を必須とした手動スモークスクリプト (CI 非対象)
-- `docs/mado-integration.md`: mado 側で別 PR として必要な bridge 起動コードの最小 diff
-- README に Production ビルド除外サンプル (推奨 + 代替パターン) と Bun bundler 実測動作のインライン記載、mado 連携セクション、FAQ、Limitations (Node 非対応の明示) を追加
+- README に Production ビルド除外サンプル (推奨 + 代替パターン) と Bun bundler 実測動作のインライン記載、FAQ、Limitations (Node 非対応の明示) を追加
 
 ### Changed
 
@@ -42,7 +45,6 @@
 ### Notes
 
 - 本リリースは `npm publish --dry-run` 段階までで停止しており、実 publish はユーザー承認待ち
-- mado への bridge 組み込みは別 PR (本タスク範囲外)。bun-mot 側の手動スモークスクリプトは mado 側 PR マージ後に手動実行する想定
 
-[Unreleased]: https://github.com/TBD/bun-mot/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/TBD/bun-mot/releases/tag/v0.1.0
+[Unreleased]: https://github.com/hummer98/bun-mot/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/hummer98/bun-mot/releases/tag/v0.1.0

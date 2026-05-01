@@ -38,3 +38,7 @@ coverage/
 
 # npm (このリポジトリは bun.lock を公式 lockfile とするため、npm 由来の lockfile は無視)
 package-lock.json
+
+# cmux-team (multi-agent orchestration の作業ディレクトリ — 公開しない)
+.team/
+.worktrees/

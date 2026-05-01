@@ -33,9 +33,9 @@ await mot.pass()  // 🚐✅ 車検合格
 
 ### Electrobun における E2E の空白
 
-`mado`（Markdown ビューワー）の開発中にアーキテクチャを検討した際、Electrobun の E2E テスト基盤が完全に空白であることが判明した。
+Electrobun アプリのアーキテクチャを検討した際、E2E テスト基盤が完全に空白であることが判明した。
 
-調査結果（`~/git/blog/output/markdown-viewer-architecture-discussion.md` §9 参照）：
+調査結果：
 
 | 調査先 | 結果 |
 |---|---|
@@ -49,7 +49,7 @@ await mot.pass()  // 🚐✅ 車検合格
 
 ### 既存資産：line-miniapp-sdk
 
-`~/git/Dear/line-miniapp-sdk` は Claude Code が実装した HTTP ブリッジ型のリモート E2E 基盤。
+`line-miniapp-sdk` は Claude Code が実装した HTTP ブリッジ型のリモート E2E 基盤。
 このアーキテクチャを Electrobun 向けに移植する。
 
 ---
@@ -194,7 +194,7 @@ test('Hot Reload が動作する', async () => {
 - [ ] Phase 2: クライアント API（`waitForSelector`・`getText`・`evaluate`）
 - [ ] Phase 3: スクリーンショット（`takeSnapshot` 連携）
 - [ ] Phase 4: コンソールログ収集（`getLogs`）
-- [ ] Phase 5: 統合テスト（`mado` アプリを使った実証）
+- [ ] Phase 5: 統合テスト（実 Electrobun アプリでの実証）
 - [ ] Phase 6: npm パッケージとして公開（`bun-mot`）
 - [ ] Phase 7: ドキュメントサイト・サンプル
 
@@ -202,6 +202,4 @@ test('Hot Reload が動作する', async () => {
 
 ## 参考
 
-- アーキテクチャ検討詳細: `~/git/blog/output/markdown-viewer-architecture-discussion.md`
-- 移植元: `~/git/Dear/line-miniapp-sdk`
-- 実証先: `~/git/mado`（Electrobun 製 Markdown ビューワー）
+- 移植元アーキテクチャ: line-miniapp-sdk (HTTP bridge + Zod スキーマ + WebView 評価)

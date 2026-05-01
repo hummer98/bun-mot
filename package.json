@@ -6,7 +6,7 @@
   "author": "Yuji Yamamoto",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TBD/bun-mot.git"
+    "url": "git+https://github.com/hummer98/bun-mot.git"
   },
   "keywords": [
     "electrobun",
@@ -53,8 +53,7 @@
     "fixture:start": "bun run test/fixtures/sample-app/main.ts",
     "typecheck": "tsc --noEmit",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "prepublishOnly": "bun run typecheck && bun run test:unit && bun run build",
-    "mado:smoke": "bun run scripts/smoke-mado.ts"
+    "prepublishOnly": "bun run typecheck && bun run test:unit && bun run build"
   },
   "dependencies": {
     "html2canvas": "^1.4.1",
