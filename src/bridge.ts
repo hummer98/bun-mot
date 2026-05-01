@@ -36,6 +36,13 @@ export interface SetupBunMotOptions {
   port: number;
   /** 0.0.0.0 vs 127.0.0.1。デフォルトは 127.0.0.1 (ローカル限定) */
   hostname?: string;
+  /**
+   * console patch の bootstrap inject に許可するタイムアウト (ms)。
+   * Electrobun 1.16 RPC のデフォルト 1s では不足するケースがあるため、defaultTimeout に揃える。
+   * 0 / 負値を渡しても bootstrap は実行する (timeout が即発火するだけ)。
+   * @default 5000
+   */
+  bootstrapTimeoutMs?: number;
 }
 
 export interface BunMotBridge {
@@ -45,6 +52,9 @@ export interface BunMotBridge {
 
 // driver で値が埋まらなかった場合の bridge 側 fallback (§2.6)
 const DEFAULT_TIMEOUT_MS = 5000;
+// console patch の bootstrap inject に許可するタイムアウト (ms)。
+// driver の defaultTimeout と意図的に揃える (#5)。
+const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 5000;
 const EXPRESSION_LOG_TRUNCATE = 200;
 
 // dispatch の同期エントリ (script 構築 / view メソッド呼び出し時) で投げられた throw は
@@ -64,6 +74,8 @@ interface BridgeState {
   bootstrapPromise: Promise<void> | null;
   // 初回 inject が成功したか。失敗時は ensure script も呼ばない (永続的な patch 不在を許容)。
   bootstrappedAtLeastOnce: boolean;
+  // bootstrap / ensure inject 双方の race timeout (ms)。SetupBunMotOptions から伝播。
+  bootstrapTimeoutMs: number;
 }
 
 export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotBridge {
@@ -71,6 +83,7 @@ export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotB
   const state: BridgeState = {
     bootstrapPromise: null,
     bootstrappedAtLeastOnce: false,
+    bootstrapTimeoutMs: opts.bootstrapTimeoutMs ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS,
   };
   const server = Bun.serve({
     port: opts.port,
@@ -180,11 +193,18 @@ async function handleHttpRequest(
   }
 }
 
+// console patch inject は best-effort (#5)。
+// bootstrap が timeout / reject しても `console_patch_failed` をログするだけで後続 command は実行する。
+// 副作用: bootstrap 失敗後は `getLogs` が `patchMissing: true` を返し続ける (bridge 再起動まで再試行しない)。
 async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise<void> {
   if (!state.bootstrapPromise) {
     state.bootstrapPromise = (async (): Promise<void> => {
       try {
-        await view.rpc.request.evaluateJavascriptWithResponse({ script: buildConsolePatchScript() });
+        await raceWithTimeout(
+          view.rpc.request.evaluateJavascriptWithResponse({ script: buildConsolePatchScript() }),
+          state.bootstrapTimeoutMs,
+          "bootstrap_inject_timeout",
+        );
         state.bootstrappedAtLeastOnce = true;
         log("console_patch_applied", { phase: "bootstrap" });
       } catch (e) {
@@ -198,10 +218,30 @@ async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise
   if (!state.bootstrappedAtLeastOnce) return;
   // navigation / reload 復旧用。失敗してもメインコマンド実行は継続。
   try {
-    await view.rpc.request.evaluateJavascriptWithResponse({ script: buildEnsurePatchScript() });
+    await raceWithTimeout(
+      view.rpc.request.evaluateJavascriptWithResponse({ script: buildEnsurePatchScript() }),
+      state.bootstrapTimeoutMs,
+      "ensure_inject_timeout",
+    );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log("console_patch_ensure_failed", { message });
+  }
+}
+
+// race timer の loser 側は inner Promise の reject/resolve を捨てる前提。
+// finally で setTimeout を確実に解除し、成功時の dangling timer を残さない。
+async function raceWithTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

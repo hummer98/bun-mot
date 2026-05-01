@@ -821,3 +821,110 @@ describe("ログフィールド (機密保護)", () => {
     }
   });
 });
+
+describe("Bootstrap timeout (#5)", () => {
+  test("bootstrap が解決しなくても evaluate は成功する", async () => {
+    let callIdx = 0;
+    const view: BunMotView = {
+      rpc: {
+        request: {
+          evaluateJavascriptWithResponse: async ({
+            script,
+          }: {
+            script: string;
+          }): Promise<unknown> => {
+            callIdx++;
+            // bootstrap script 識別: __BUNMOT_LOGS__ + MAX を含み、!window.__BUNMOT_LOGS__ ガードを含まない
+            const isBootstrap =
+              script.includes("__BUNMOT_LOGS__") &&
+              script.includes("MAX") &&
+              !script.includes("!window.__BUNMOT_LOGS__");
+            if (isBootstrap) {
+              // 永遠に解決しない Promise (RPC の 1s timeout を超える状態を模倣)
+              return await new Promise<unknown>(() => {});
+            }
+            return 42;
+          },
+        },
+      },
+    };
+    const bridge = setupBunMot(view, { port: 0, bootstrapTimeoutMs: 50 });
+    const res = await postCommand(bridge, {
+      type: "evaluate",
+      expression: "1+1",
+    });
+    const body = (await res.json()) as { success: boolean; result: unknown };
+    expect(body).toEqual({ success: true, result: 42 });
+    expect(callIdx).toBeGreaterThanOrEqual(1);
+    bridge.stop();
+  });
+
+  test("bootstrap timeout は default 5000ms で発火する (option 省略時)", async () => {
+    // 直接 default 値を assert はしないが、option 省略時に bootstrap が ~200ms 遅延しても
+    // テストランタイム (5s 以内) で完走することを確認する。
+    let bootstrapResolved = false;
+    const view: BunMotView = {
+      rpc: {
+        request: {
+          evaluateJavascriptWithResponse: async ({
+            script,
+          }: {
+            script: string;
+          }): Promise<unknown> => {
+            const isBootstrap =
+              script.includes("__BUNMOT_LOGS__") &&
+              script.includes("MAX") &&
+              !script.includes("!window.__BUNMOT_LOGS__");
+            if (isBootstrap) {
+              await new Promise((r) => setTimeout(r, 200));
+              bootstrapResolved = true;
+              return undefined;
+            }
+            return 1;
+          },
+        },
+      },
+    };
+    const bridge = setupBunMot(view, { port: 0 }); // bootstrapTimeoutMs 省略 → 5000
+    const res = await postCommand(bridge, {
+      type: "evaluate",
+      expression: "1",
+    });
+    expect(res.status).toBe(200);
+    expect(bootstrapResolved).toBe(true); // 5s 内に bootstrap が完走した
+    bridge.stop();
+  });
+
+  test("bootstrap timeout 後でも getLogs は patchMissing: true で返る", async () => {
+    const view: BunMotView = {
+      rpc: {
+        request: {
+          evaluateJavascriptWithResponse: async ({
+            script,
+          }: {
+            script: string;
+          }): Promise<unknown> => {
+            const isBootstrap =
+              script.includes("__BUNMOT_LOGS__") &&
+              script.includes("MAX") &&
+              !script.includes("!window.__BUNMOT_LOGS__");
+            if (isBootstrap) return await new Promise<unknown>(() => {});
+            if (script.includes("buf.drain")) {
+              return { entries: [], droppedCount: 0, patchMissing: true };
+            }
+            return undefined;
+          },
+        },
+      },
+    };
+    const bridge = setupBunMot(view, { port: 0, bootstrapTimeoutMs: 30 });
+    const res = await postCommand(bridge, { type: "getLogs" });
+    const body = (await res.json()) as {
+      success: boolean;
+      result: { patchMissing: boolean };
+    };
+    expect(body.success).toBe(true);
+    expect(body.result.patchMissing).toBe(true);
+    bridge.stop();
+  });
+});

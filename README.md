@@ -213,6 +213,7 @@ Starts the in-app HTTP bridge.
 | `view` | `BunMotView` | ✓ | Object exposing `evaluateJavascriptWithResponse`. |
 | `options.port` | `number` | ✓ | Bind port (`0` for an ephemeral one). |
 | `options.hostname` | `string` |  | Bind host (default `127.0.0.1`). |
+| `options.bootstrapTimeoutMs` | `number` |  | Timeout for the first `console.*` patch injection (ms, default `5000`). |
 
 Returns: `{ port: number, stop(): void }`.
 
@@ -311,6 +312,7 @@ bun-mot captures `console.log` / `console.warn` / `console.error` from the WebVi
 
 - Output before the patch is injected (i.e. before the first command) is not captured.
 - The first `getLogs()` immediately after navigation / reload returns empty plus a warn entry, since the patch has not been re-injected yet. Workaround: call any other command first (e.g. `mot.evaluate('1')`) to trigger re-injection.
+- **Bootstrap is best-effort.** The first `console.*` patch injection runs lazily on the first command. If it times out (default 5s, configurable via `setupBunMot({ bootstrapTimeoutMs })`) or rejects, bun-mot logs `console_patch_failed` and continues with your command anyway — `waitForSelector` / `click` / `evaluate` will still work, but `getLogs()` will keep returning `patchMissing: true` until the bridge is restarted. Increase `bootstrapTimeoutMs` if your app's first paint is slow.
 
 ### Out of scope
 
