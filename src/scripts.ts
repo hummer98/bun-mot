@@ -14,16 +14,38 @@ import type { TextMatcher } from "./commands";
 // フォールバック (`fs.readFileSync(require.resolve(...))`) は probe で第一候補が動いたため不要。
 import html2canvasSource from "html2canvas/dist/html2canvas.min.js" with { type: "text" };
 
-// MutationObserver の wait 系を組み立てる共通 helper。
-// predicateBody は要素が条件を満たすかチェックする JS 式。`el` は document.querySelector 結果 (null 含む)。
-// 戻り値は { found: true } のような result object を resolve する式 (resolveExpr) を埋め込む。
+// WebView 側 wait 系スクリプトが 1 chunk ごとに resolve する結果の形。
+// bridge は dispatchWaitChunkLoop でこれを受け取って累計 elapsed を計算し、
+// matched: true で wire-format (`{ found: true }` 等) に変換、
+// 全体 timeout 到達で `__BUNMOT_TIMEOUT__:<selector>:<elapsed>` reject を生成する。
+// chunk script は常に resolve し、reject はしない (chunk timeout は「未達」を表す通常結果)。
+export interface WaitChunkResult {
+  matched: boolean;
+  elapsed: number;
+}
+
+export function isWaitChunkResult(value: unknown): value is WaitChunkResult {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as { matched?: unknown; elapsed?: unknown };
+  return typeof v.matched === "boolean" && typeof v.elapsed === "number";
+}
+
+// MutationObserver の wait 系を組み立てる共通 helper (chunk script generator)。
+// chunk script は **常に resolve し、reject はしない** (reject 経路を持たない)。
+// - predicate が true → `{ matched: true, elapsed }` で resolve
+// - chunk timeout 到達 → `{ matched: false, elapsed }` で resolve
+//
+// bridge 側 dispatchWaitChunkLoop はこれを受け取り、累計 elapsed (Date.now() ベース) で
+// 全体 timeout を管理する。matched: true なら wire-format (`{ found: true }` 等) に変換し、
+// 全体 timeout 到達なら `__BUNMOT_TIMEOUT__:<selector>:<elapsed>` を bridge 自身が組み立てる。
+//
+// chunkTimeoutMs は WebView 側 setTimeout の長さ。Electrobun preload の 10s WS timeout を
+// 回避するため bridge は chunkTimeoutMs 以下のチャンクに分割して繰り返し評価する。
 interface MutationWaitOpts {
   selector: string;
-  timeout: number;
+  chunkTimeoutMs: number;
   // predicateBody: el を引数に取り、条件を満たすなら true を返す JS 関数本文 (例: "return el !== null;")
   predicateFnBody: string;
-  // resolveExpr: predicate true の時に resolve に渡す式 (例: "{ found: true }")
-  resolveExpr: string;
   // observe options を JSON にシリアライズした文字列 (例: '{ childList: true, subtree: true }')
   observeOpts: string;
   // rAF フォールバックを有効にするか
@@ -32,11 +54,11 @@ interface MutationWaitOpts {
 
 function buildMutationWaitScript(opts: MutationWaitOpts): string {
   const sel = JSON.stringify(opts.selector);
-  const t = String(opts.timeout);
+  const t = String(opts.chunkTimeoutMs);
   const raf = opts.withRaf
     ? `\n  requestAnimationFrame(() => {\n    if (check()) done();\n  });`
     : "";
-  return `return new Promise((resolve, reject) => {
+  return `return new Promise((resolve) => {
   const SELECTOR = ${sel};
   const TIMEOUT = ${t};
   const start = Date.now();
@@ -44,13 +66,13 @@ function buildMutationWaitScript(opts: MutationWaitOpts): string {
   const predicate = (el) => { ${opts.predicateFnBody} };
   const check = () => predicate(document.querySelector(SELECTOR));
 
-  if (check()) { resolve(${opts.resolveExpr}); return; }
+  if (check()) { resolve({ matched: true, elapsed: Date.now() - start }); return; }
 
   let timeoutId;
   const done = () => {
     observer.disconnect();
     clearTimeout(timeoutId);
-    resolve(${opts.resolveExpr});
+    resolve({ matched: true, elapsed: Date.now() - start });
   };
   const observer = new MutationObserver(() => {
     if (check()) done();
@@ -59,7 +81,7 @@ function buildMutationWaitScript(opts: MutationWaitOpts): string {
 ${raf}
   timeoutId = setTimeout(() => {
     observer.disconnect();
-    reject('__BUNMOT_TIMEOUT__:' + SELECTOR + ':' + (Date.now() - start));
+    resolve({ matched: false, elapsed: Date.now() - start });
   }, TIMEOUT);
 });`;
 }
@@ -70,40 +92,21 @@ export function buildEvaluateScript(expression: string): string {
   return `return (${expression});`;
 }
 
-export function buildWaitForSelectorScript(selector: string, timeout: number): string {
+export function buildWaitForSelectorScript(
+  selector: string,
+  chunkTimeoutMs: number,
+): string {
   // MutationObserver で DOM 変化を監視。ポーリング不可 (CLAUDE.md)。
-  // rAF フォールバック 1 回のみ許容。
-  const sel = JSON.stringify(selector);
-  const t = String(timeout);
-  return `return new Promise((resolve, reject) => {
-  const SELECTOR = ${sel};
-  const TIMEOUT = ${t};
-  const start = Date.now();
-
-  const initial = document.querySelector(SELECTOR);
-  if (initial) { resolve({ found: true }); return; }
-
-  let timeoutId;
-  const done = () => {
-    observer.disconnect();
-    clearTimeout(timeoutId);
-    resolve({ found: true });
-  };
-  const observer = new MutationObserver(() => {
-    if (document.querySelector(SELECTOR)) done();
+  // rAF フォールバック 1 回のみ許容 (`withRaf: true`)。
+  // chunk script は 1 chunk 内で必ず resolve する (reject なし)。bridge 側が
+  // dispatchWaitChunkLoop で全体 timeout を管理する。
+  return buildMutationWaitScript({
+    selector,
+    chunkTimeoutMs,
+    predicateFnBody: "return el !== null;",
+    observeOpts: "{ childList: true, subtree: true }",
+    withRaf: true,
   });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-
-  // rAF フォールバック: 初回描画直後に 1 回だけ追加チェック
-  requestAnimationFrame(() => {
-    if (document.querySelector(SELECTOR)) done();
-  });
-
-  timeoutId = setTimeout(() => {
-    observer.disconnect();
-    reject('__BUNMOT_TIMEOUT__:' + SELECTOR + ':' + (Date.now() - start));
-  }, TIMEOUT);
-});`;
 }
 
 export function buildGetTextScript(selector: string): string {
@@ -193,19 +196,21 @@ export function buildGetAttributeScript(selector: string, attribute: string): st
 });`;
 }
 
-export function buildWaitForHiddenScript(selector: string, timeout: number): string {
-  // 「要素がない」「isVisible が false」のいずれかが真なら resolve。
-  // §2.8: 最初から DOM にない場合は即時 resolve。
+export function buildWaitForHiddenScript(
+  selector: string,
+  chunkTimeoutMs: number,
+): string {
+  // 「要素がない」「isVisible が false」のいずれかが真なら matched: true。
+  // §2.8: 最初から DOM にない場合は即時 matched: true (1 chunk 内で resolve)。
   // characterData / attributes も観察 (style 変化 / class 変化を検知)。
   return buildMutationWaitScript({
     selector,
-    timeout,
+    chunkTimeoutMs,
     predicateFnBody: `
       const isVisibleFn = ${isVisibleJsExpr()};
       if (!el) return true;
       return !isVisibleFn(el);
     `,
-    resolveExpr: "{ hidden: true }",
     observeOpts:
       "{ childList: true, subtree: true, attributes: true, characterData: true }",
     withRaf: false,
@@ -215,7 +220,7 @@ export function buildWaitForHiddenScript(selector: string, timeout: number): str
 export function buildWaitForTextScript(
   selector: string,
   text: TextMatcher,
-  timeout: number,
+  chunkTimeoutMs: number,
 ): string {
   // text matcher を JS 内で再構築。
   let matcherFnBody: string;
@@ -229,13 +234,12 @@ export function buildWaitForTextScript(
   }
   return buildMutationWaitScript({
     selector,
-    timeout,
-    // §2.5: selector が DOM になければ timeout まで待機 (false を返して再評価)。
+    chunkTimeoutMs,
+    // §2.5: selector が DOM になければ chunk timeout まで待機 (false を返して再評価)。
     predicateFnBody: `
       if (!el) return false;
       ${matcherFnBody}
     `,
-    resolveExpr: "{ matched: true }",
     observeOpts:
       "{ childList: true, subtree: true, characterData: true, attributes: true }",
     withRaf: false,

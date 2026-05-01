@@ -77,8 +77,13 @@ describe("POST /command - 正常系", () => {
     bridge.stop();
   });
 
-  test("waitForSelector 正常系: { found: true } が返る", async () => {
-    const { view } = createMockView(async () => ({ found: true }));
+  test("waitForSelector 正常系: chunk が matched: true → wire { found: true }", async () => {
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        return { matched: true, elapsed: 100 };
+      }
+      return undefined;
+    });
     const bridge = setupBunMot(view, { port: 0 });
     const res = await postCommand(bridge, {
       type: "waitForSelector",
@@ -114,20 +119,27 @@ describe("POST /command - 正常系", () => {
   });
 
   test("waitForSelector で timeout 未指定でも bridge が 5000ms にフォールバック", async () => {
-    const { view, evaluateMock } = createMockView(async () => ({ found: true }));
+    const { view, evaluateMock } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        return { matched: true, elapsed: 50 };
+      }
+      return undefined;
+    });
     const bridge = setupBunMot(view, { port: 0 });
     const res = await postCommand(bridge, {
       type: "waitForSelector",
       selector: ".foo",
     });
     expect(res.status).toBe(200);
-    // §4.1: bootstrap (1) + ensure (2) + 実コマンド (3)。最後の呼び出しに 5000 が埋め込まれている
+    // §4.1: bootstrap (1) + ensure (2) + 実コマンド (3)。実コマンド (chunk script) に 5000 が埋め込まれている
     const calls = evaluateMock.mock.calls;
     expect(calls).toHaveLength(3);
     const lastCall = calls[calls.length - 1];
     expect(lastCall).toBeDefined();
     if (lastCall) {
       expect(lastCall[0]?.script).toContain("5000");
+      // chunk script は MutationObserver を含む
+      expect(lastCall[0]?.script).toContain("MutationObserver");
     }
     bridge.stop();
   });
@@ -167,9 +179,13 @@ describe("POST /command - バリデーション", () => {
 });
 
 describe("POST /command - エラーマッピング", () => {
-  test("__BUNMOT_TIMEOUT__ prefix で reject → kind: timeout", async () => {
-    const { view } = createMockView(async () => {
-      throw "__BUNMOT_TIMEOUT__:.foo:5000";
+  test("chunk が matched: false を返し続けると bridge が __BUNMOT_TIMEOUT__ で reject (kind: timeout)", async () => {
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        // 全 chunk が unmatched
+        return { matched: false, elapsed: 5000 };
+      }
+      return undefined;
     });
     const bridge = setupBunMot(view, { port: 0 });
     const res = await postCommand(bridge, {
@@ -183,6 +199,28 @@ describe("POST /command - エラーマッピング", () => {
       error: { kind: string; message: string };
     };
     expect(body.success).toBe(false);
+    expect(body.error.kind).toBe("timeout");
+    expect(body.error.message).toContain("__BUNMOT_TIMEOUT__");
+    expect(body.error.message).toContain(".foo");
+    bridge.stop();
+  });
+
+  test("WebView が直接 __BUNMOT_TIMEOUT__ throw した場合も kind: timeout (preload reject 経路)", async () => {
+    // chunk script は通常 reject しないが、preload 切断等で WebView 側 evaluate が reject した場合
+    // 既存の mapErrorToKind が prefix で timeout に分類することを保証する。
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        throw "__BUNMOT_TIMEOUT__:.foo:5000";
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 5000,
+    });
+    const body = (await res.json()) as { error: { kind: string } };
     expect(body.error.kind).toBe("timeout");
     bridge.stop();
   });
@@ -350,9 +388,10 @@ describe("POST /command - 新コマンド (T002)", () => {
     bridge.stop();
   });
 
-  test("waitForHidden 正常系", async () => {
+  test("waitForHidden 正常系: chunk が matched: true → wire { hidden: true }", async () => {
     const { view } = createMockView(async (script: string) => {
-      if (script.includes("hidden")) return { hidden: true };
+      // chunk script は MutationObserver を含み、isVisibleFn で hidden 判定する
+      if (script.includes("isVisibleFn")) return { matched: true, elapsed: 100 };
       return undefined;
     });
     const bridge = setupBunMot(view, { port: 0 });
@@ -365,10 +404,10 @@ describe("POST /command - 新コマンド (T002)", () => {
     bridge.stop();
   });
 
-  test("waitForHidden で timeout reject → kind: timeout", async () => {
+  test("waitForHidden で全 chunk unmatched → kind: timeout", async () => {
     const { view } = createMockView(async (script: string) => {
-      if (script.includes("hidden")) {
-        throw "__BUNMOT_TIMEOUT__:.x:1000";
+      if (script.includes("isVisibleFn")) {
+        return { matched: false, elapsed: 1000 };
       }
       return undefined;
     });
@@ -386,9 +425,9 @@ describe("POST /command - 新コマンド (T002)", () => {
   test("waitForText 正常系: wire-format (string) を script に含む", async () => {
     let lastCommandScript = "";
     const { view } = createMockView(async (script: string) => {
-      if (script.includes("matched")) {
+      if (script.includes("includes")) {
         lastCommandScript = script;
-        return { matched: true };
+        return { matched: true, elapsed: 100 };
       }
       return undefined;
     });
@@ -400,6 +439,7 @@ describe("POST /command - 新コマンド (T002)", () => {
       timeout: 1000,
     });
     expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, result: { matched: true } });
     expect(lastCommandScript).toContain("includes");
     expect(lastCommandScript).toContain("hello");
     bridge.stop();
@@ -408,9 +448,9 @@ describe("POST /command - 新コマンド (T002)", () => {
   test("waitForText 正常系: wire-format (regex) を script に含む", async () => {
     let lastCommandScript = "";
     const { view } = createMockView(async (script: string) => {
-      if (script.includes("matched")) {
+      if (script.includes("RegExp")) {
         lastCommandScript = script;
-        return { matched: true };
+        return { matched: true, elapsed: 100 };
       }
       return undefined;
     });
@@ -798,7 +838,7 @@ describe("ログフィールド (機密保護)", () => {
     };
     try {
       const { view } = createMockView(async (script: string) => {
-        if (script.includes("matched")) return { matched: true };
+        if (script.includes("includes")) return { matched: true, elapsed: 100 };
         return undefined;
       });
       const bridge = setupBunMot(view, { port: 0 });
@@ -926,5 +966,331 @@ describe("Bootstrap timeout (#5)", () => {
     expect(body.success).toBe(true);
     expect(body.result.patchMissing).toBe(true);
     bridge.stop();
+  });
+});
+
+describe("wait 系 chunk loop (#7: Electrobun preload 10s WS timeout 回避)", () => {
+  // chunk script に渡された CHUNK_TIMEOUT 値を抽出する小ヘルパー。
+  // chunk script は `const TIMEOUT = <ms>;` を含むため正規表現で取り出す。
+  function extractChunkTimeoutMs(script: string): number | null {
+    const m = script.match(/const TIMEOUT = (\d+);/);
+    if (!m || m[1] === undefined) return null;
+    return Number.parseInt(m[1], 10);
+  }
+
+  test("setupBunMot: chunkTimeoutMs 未指定時は 5000ms がデフォルト", async () => {
+    const sizes: number[] = [];
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        const size = extractChunkTimeoutMs(script);
+        if (size !== null) sizes.push(size);
+        return { matched: true, elapsed: 10 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0 });
+    await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 4000,
+    });
+    // timeout=4000, default chunkTimeoutMs=5000 → min(5000,4000)=4000
+    expect(sizes).toEqual([4000]);
+    bridge.stop();
+  });
+
+  test("waitForSelector: timeout=4000 → 1 chunk (size=4000) で完結 (chunk_completed 1 回)", async () => {
+    let chunkCount = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        chunkCount++;
+        return { matched: false, elapsed: 4000 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const start = Date.now();
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 4000,
+    });
+    const elapsedReal = Date.now() - start;
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean; error?: { kind: string } };
+    expect(body.success).toBe(false);
+    expect(body.error?.kind).toBe("timeout");
+    expect(chunkCount).toBe(1);
+    // chunk loop が無駄に長く待たないこと (mock は即座に false を返すので実時間は数十 ms)
+    expect(elapsedReal).toBeLessThan(2000);
+    bridge.stop();
+  });
+
+  test("waitForSelector: timeout=6000, chunkTimeoutMs=5000 → 2 chunks (5000 + 1000)", async () => {
+    const sizes: number[] = [];
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        const size = extractChunkTimeoutMs(script);
+        if (size !== null) sizes.push(size);
+        return { matched: false, elapsed: size ?? 0 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 6000,
+    });
+    const body = (await res.json()) as { error?: { kind: string; message: string } };
+    expect(body.error?.kind).toBe("timeout");
+    expect(sizes).toEqual([5000, 1000]);
+    bridge.stop();
+  });
+
+  test("waitForSelector: timeout=60000 → 全 chunk unmatched で timeout (selector / elapsed をメッセージに含む)", async () => {
+    let chunkCount = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        chunkCount++;
+        return { matched: false, elapsed: 5000 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 60000,
+    });
+    const body = (await res.json()) as { error?: { kind: string; message: string } };
+    expect(body.error?.kind).toBe("timeout");
+    expect(body.error?.message).toContain(".foo");
+    expect(body.error?.message).toMatch(/__BUNMOT_TIMEOUT__:\.foo:\d+/);
+    // mock は実時間 0 で false を返すため、bridge は Date.now() ベースの totalElapsed が
+    // 60000 に達するまで chunk を回し続ける。実時間で 60s 以内に終わらない可能性を避けるため
+    // 件数 (>=1) は確認するが上限の 12 件は強制しない (実時間依存のため緩めに検証)。
+    expect(chunkCount).toBeGreaterThanOrEqual(1);
+    bridge.stop();
+  });
+
+  test("waitForSelector: 3 chunk 目で matched: true → success と { found: true } が返る", async () => {
+    let count = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        count++;
+        if (count >= 3) return { matched: true, elapsed: 234 };
+        return { matched: false, elapsed: 5000 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 60000,
+    });
+    expect(await res.json()).toEqual({ success: true, result: { found: true } });
+    expect(count).toBe(3);
+    bridge.stop();
+  });
+
+  test("waitForSelector: timeout=4999 → 1 chunk (size=4999)", async () => {
+    let chunkSize = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        const size = extractChunkTimeoutMs(script);
+        if (size !== null) chunkSize = size;
+        return { matched: false, elapsed: chunkSize };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 4999,
+    });
+    expect(chunkSize).toBe(4999);
+    bridge.stop();
+  });
+
+  test("waitForSelector: timeout=5000 → 1 chunk (size=5000、ちょうど境界)", async () => {
+    let chunkCount = 0;
+    let lastSize = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        chunkCount++;
+        const size = extractChunkTimeoutMs(script);
+        if (size !== null) lastSize = size;
+        return { matched: false, elapsed: lastSize };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 5000,
+    });
+    expect(chunkCount).toBe(1);
+    expect(lastSize).toBe(5000);
+    bridge.stop();
+  });
+
+  test("setupBunMot: chunkTimeoutMs=2000 で wait 系 chunk が 2000ms 以下に分割される", async () => {
+    const sizes: number[] = [];
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        const size = extractChunkTimeoutMs(script);
+        if (size !== null) sizes.push(size);
+        return { matched: false, elapsed: size ?? 0 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 2000 });
+    await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 5000,
+    });
+    // 2000 + 2000 + 1000 → 3 chunks
+    expect(sizes).toEqual([2000, 2000, 1000]);
+    bridge.stop();
+  });
+
+  test("waitForHidden: chunk loop で hidden を待つ (matched: true → wire { hidden: true })", async () => {
+    let count = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("isVisibleFn")) {
+        count++;
+        if (count >= 2) return { matched: true, elapsed: 500 };
+        return { matched: false, elapsed: 5000 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForHidden",
+      selector: ".x",
+      timeout: 30000,
+    });
+    expect(await res.json()).toEqual({ success: true, result: { hidden: true } });
+    expect(count).toBe(2);
+    bridge.stop();
+  });
+
+  test("waitForText: chunk loop で text match を待つ (matched: true → wire { matched: true })", async () => {
+    let count = 0;
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("includes")) {
+        count++;
+        if (count >= 4) return { matched: true, elapsed: 1234 };
+        return { matched: false, elapsed: 5000 };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForText",
+      selector: ".x",
+      text: { kind: "string", value: "hello" },
+      timeout: 60000,
+    });
+    expect(await res.json()).toEqual({ success: true, result: { matched: true } });
+    expect(count).toBe(4);
+    bridge.stop();
+  });
+
+  test("waitForSelector: chunk が { matched, elapsed } 以外 (旧 shape) を返したら internal_error", async () => {
+    const { view } = createMockView(async (script: string) => {
+      if (script.includes("MutationObserver")) {
+        return { found: true };
+      }
+      return undefined;
+    });
+    const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+    const res = await postCommand(bridge, {
+      type: "waitForSelector",
+      selector: ".foo",
+      timeout: 5000,
+    });
+    const body = (await res.json()) as { error?: { kind: string } };
+    expect(body.error?.kind).toBe("internal_error");
+    bridge.stop();
+  });
+
+  test("setupBunMot: chunkTimeoutMs <= 0 は throw する (sanity check)", () => {
+    const { view } = createMockView(async () => null);
+    expect(() => setupBunMot(view, { port: 0, chunkTimeoutMs: 0 })).toThrow();
+    expect(() => setupBunMot(view, { port: 0, chunkTimeoutMs: -1 })).toThrow();
+    expect(() => setupBunMot(view, { port: 0, chunkTimeoutMs: Number.NaN })).toThrow();
+  });
+
+  test("wait_chunk_completed ログイベントが各 chunk で発火する", async () => {
+    process.env["BUN_MOT_LOG"] = "verbose";
+    const captured: string[] = [];
+    const original = console.log;
+    console.log = (msg: string): void => {
+      captured.push(msg);
+    };
+    try {
+      let count = 0;
+      const { view } = createMockView(async (script: string) => {
+        if (script.includes("MutationObserver")) {
+          count++;
+          if (count >= 2) return { matched: true, elapsed: 100 };
+          return { matched: false, elapsed: 5000 };
+        }
+        return undefined;
+      });
+      const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+      await postCommand(bridge, {
+        type: "waitForSelector",
+        selector: ".foo",
+        timeout: 60000,
+      });
+      const chunkLogs = captured.filter((l) => l.includes("wait_chunk_completed"));
+      expect(chunkLogs.length).toBe(2);
+      expect(chunkLogs[0] ?? "").toContain("type=waitForSelector");
+      expect(chunkLogs[0] ?? "").toContain("matched=false");
+      expect(chunkLogs[1] ?? "").toContain("matched=true");
+      bridge.stop();
+    } finally {
+      console.log = original;
+      process.env["BUN_MOT_LOG"] = "silent";
+    }
+  });
+
+  test("wait_total_timeout ログイベントが全体 timeout 到達時に発火する", async () => {
+    process.env["BUN_MOT_LOG"] = "verbose";
+    const captured: string[] = [];
+    const original = console.log;
+    console.log = (msg: string): void => {
+      captured.push(msg);
+    };
+    try {
+      const { view } = createMockView(async (script: string) => {
+        if (script.includes("MutationObserver")) {
+          return { matched: false, elapsed: 5000 };
+        }
+        return undefined;
+      });
+      const bridge = setupBunMot(view, { port: 0, chunkTimeoutMs: 5000 });
+      await postCommand(bridge, {
+        type: "waitForSelector",
+        selector: ".foo",
+        timeout: 5000,
+      });
+      const totalLogs = captured.filter((l) => l.includes("wait_total_timeout"));
+      expect(totalLogs.length).toBe(1);
+      expect(totalLogs[0] ?? "").toContain("type=waitForSelector");
+      expect(totalLogs[0] ?? "").toContain("selector=.foo");
+      expect(totalLogs[0] ?? "").toContain("timeoutMs=5000");
+      bridge.stop();
+    } finally {
+      console.log = original;
+      process.env["BUN_MOT_LOG"] = "silent";
+    }
   });
 });

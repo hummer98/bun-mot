@@ -193,6 +193,7 @@ mot.view("a").view("b").evaluate("1");
 | `view` | `BunMotView` | ✓ | `evaluateJavascriptWithResponse` を持つオブジェクト |
 | `options.port` | `number` | ✓ | バインドするポート (`0` でランダム割当) |
 | `options.hostname` | `string` |  | バインド先ホスト (デフォルト `127.0.0.1`) |
+| `options.chunkTimeoutMs` | `number` |  | wait 系 chunk loop の 1 チャンク内 timeout (ms, デフォルト `5000`)。詳細は [長時間 wait](#長時間-wait-electrobun-preload-の-10s-ws-制限) 参照 |
 
 戻り値: `{ port: number, stop(): void }`
 
@@ -274,6 +275,24 @@ mot.view("a").view("b").evaluate("1");
 | `BunMotElementNotInteractableError` | `element_not_interactable` | `click` 対象が `HTMLElement` でない、`fill` 対象が `<input>` / `<textarea>` でない |
 | `BunMotEvaluationError` | `evaluation_error` | `evaluate` の式が例外を投げた |
 | `BunMotError` (基底) | `validation_error` / `internal_error` | プロトコル違反 / 内部例外 |
+
+#### 長時間 wait (Electrobun preload の 10s WS 制限)
+
+Electrobun 1.16 の preload (`internalRpc.request`) は `evaluateJavascriptWithResponse` 1 呼び出しあたり 10 秒の hard-coded timeout を持つ。`waitForSelector` / `waitForHidden` / `waitForText` で 10 秒を超える `timeout` を扱えるよう、bun-mot bridge は wait 系コマンドを **チャンク (デフォルト 5 秒)** に分割し、ループで再評価する。`MutationObserver` の即応性は 1 チャンク内で維持しつつ、全体の wait は呼び出し側が指定した `timeout` まで延長できる。driver 側 API と wire-format (`{ found: true }` / `BunMotTimeoutError` のメッセージ) はそのまま (互換)。
+
+`setupBunMot({ chunkTimeoutMs })` で **アプリ側** で調整する:
+
+```typescript
+// app/main.ts
+import { setupBunMot } from "bun-mot/bridge";
+setupBunMot(view, { port, chunkTimeoutMs: 5000 });
+```
+
+| オプション | デフォルト | 変更が必要な場合 |
+|---|---|---|
+| `chunkTimeoutMs` | `5000` | Electrobun preload の挙動が変わったときに調整。`8000` を超える値は preload の 10 秒制限に当たるリスクが上がる。`> 0` 必須 |
+
+各チャンクは `wait_chunk_completed` ログイベントを発火する (`type=` / `selector=` / `matched=` / `chunkElapsedMs=` / `totalElapsedMs=` / `thisChunkMs=`)。全体 timeout 到達時は `wait_total_timeout` を発火 (`timeoutMs=` / `totalElapsedMs=` / `chunks=`)。
 
 ## Console Logs
 

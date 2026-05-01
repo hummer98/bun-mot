@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **#7**: `waitForSelector` / `waitForHidden` / `waitForText` で `timeout > 10000` を指定しても Electrobun 1.16 preload (`internalRpc.request`) の 10 秒固定 RPC timeout で打ち切られていた問題を修正。bridge 側で wait 系コマンドを `chunkTimeoutMs` (デフォルト 5000ms) ごとのチャンクに分割し、ループで再評価することで、全体 timeout を任意の長さに拡張した。各チャンク内では引き続き `MutationObserver` (rAF フォールバック付き) で即応する。driver 側 API・wire-format (`{ found: true }` / `{ hidden: true }` / `{ matched: true }`) ・`BunMotTimeoutError` のメッセージは互換性を維持
+
+### Added
+
+- `setupBunMot({ chunkTimeoutMs })`: 1 チャンクあたりの内部 timeout (ms)。デフォルト 5000ms (Electrobun preload の 10 秒制限に対する 50% 安全マージン)。`<= 0` を渡すと throw する (sanity check)
+- bridge ログに `wait_chunk_completed` イベントを追加 (`type=` / `selector=` / `matched=` / `chunkElapsedMs=` / `totalElapsedMs=` / `thisChunkMs=`)
+- bridge ログに `wait_total_timeout` イベントを追加 (全体 timeout 到達時に発火、`timeoutMs=` / `totalElapsedMs=` / `chunks=`)
+- WebView 側 chunk script 内部プロトコル `WaitChunkResult` (`{ matched: boolean, elapsed: number }`) と型ガード `isWaitChunkResult` を `src/scripts.ts` から export
+
+### Changed (internal)
+
+- `src/scripts.ts`: `buildWaitForSelectorScript` / `buildWaitForHiddenScript` / `buildWaitForTextScript` の WebView 側スクリプトを reshape。reject 経路を削除し、常に `{ matched, elapsed }` で resolve する形に統一。reshape のついでに `buildWaitForSelectorScript` を共通 helper `buildMutationWaitScript` に統合
+- `src/bridge.ts`: `dispatchCommand` の wait 系 case を `dispatchWaitChunkLoop` (chunk loop) に分離。`buildScriptForCommand` の責務を「wait 系以外の単発 evaluate 用」と明確化
+
 ## [0.1.1] - 2026-05-01
 
 slaido (Electrobun 1.16) からのフィードバック (#1, #2, #3) を反映した緊急バグ修正リリース。

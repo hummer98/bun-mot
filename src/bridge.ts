@@ -3,6 +3,9 @@ import {
   CommandRequestSchema,
   type CommandRequest,
   type CommandResponse,
+  type WaitForHiddenRequest,
+  type WaitForSelectorRequest,
+  type WaitForTextRequest,
 } from "./commands";
 import { log } from "./logger";
 import {
@@ -19,6 +22,7 @@ import {
   buildEnsurePatchScript,
   buildGetLogsScript,
   buildScreenshotScript,
+  isWaitChunkResult,
 } from "./scripts";
 
 // `tsconfig.build.json` で `types: []` を採用し、@types/bun の global を含めない方針のため
@@ -43,6 +47,13 @@ export interface SetupBunMotOptions {
    * @default 5000
    */
   bootstrapTimeoutMs?: number;
+  /**
+   * 1 チャンクあたりの内部 timeout (ms)。Electrobun 1.16 preload の 10s WS timeout を
+   * 回避するため、bridge は wait 系コマンドをこの値以下のチャンクに分割して繰り返し評価する。
+   * デフォルト 5000ms (10s 制限に対する 50% 安全マージン)。
+   * 注意: 8000 を超える値は preload の 10s 制限に当たるリスクが上がるため非推奨。
+   */
+  chunkTimeoutMs?: number;
 }
 
 export interface BunMotBridge {
@@ -55,7 +66,21 @@ const DEFAULT_TIMEOUT_MS = 5000;
 // console patch の bootstrap inject に許可するタイムアウト (ms)。
 // driver の defaultTimeout と意図的に揃える (#5)。
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 5000;
+// 1 チャンクあたりの WebView 側 setTimeout 既定値。Electrobun preload の 10s 制限に対する
+// 50% 安全マージン。setupBunMot({ chunkTimeoutMs }) で上書き可能。
+const DEFAULT_CHUNK_TIMEOUT_MS = 5000;
 const EXPRESSION_LOG_TRUNCATE = 200;
+
+// wait 系コマンド (chunk loop の対象)
+type WaitCommand = WaitForSelectorRequest | WaitForHiddenRequest | WaitForTextRequest;
+
+function isWaitCommand(cmd: CommandRequest): cmd is WaitCommand {
+  return (
+    cmd.type === "waitForSelector" ||
+    cmd.type === "waitForHidden" ||
+    cmd.type === "waitForText"
+  );
+}
 
 // dispatch の同期エントリ (script 構築 / view メソッド呼び出し時) で投げられた throw は
 // bridge / view 接続側の内部例外として `internal_error` に分類する。
@@ -76,14 +101,24 @@ interface BridgeState {
   bootstrappedAtLeastOnce: boolean;
   // bootstrap / ensure inject 双方の race timeout (ms)。SetupBunMotOptions から伝播。
   bootstrapTimeoutMs: number;
+  // wait 系 chunk loop で 1 chunk あたりに使う WebView 側 setTimeout の長さ (ms)。
+  chunkTimeoutMs: number;
 }
 
 export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotBridge {
   const hostname = opts.hostname ?? "127.0.0.1";
+  const chunkTimeoutMs = opts.chunkTimeoutMs ?? DEFAULT_CHUNK_TIMEOUT_MS;
+  // chunkTimeoutMs <= 0 は無限ループ相当の挙動を招くため API 境界で reject (M-2)。
+  if (!Number.isFinite(chunkTimeoutMs) || chunkTimeoutMs <= 0) {
+    throw new Error(
+      `setupBunMot: chunkTimeoutMs must be a positive finite number (got ${String(chunkTimeoutMs)})`,
+    );
+  }
   const state: BridgeState = {
     bootstrapPromise: null,
     bootstrappedAtLeastOnce: false,
     bootstrapTimeoutMs: opts.bootstrapTimeoutMs ?? DEFAULT_BOOTSTRAP_TIMEOUT_MS,
+    chunkTimeoutMs,
   };
   const server = Bun.serve({
     port: opts.port,
@@ -95,7 +130,7 @@ export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotB
     server.stop(true);
     throw new Error("Bun.serve did not assign a port");
   }
-  log("bridge_started", { port, hostname });
+  log("bridge_started", { port, hostname, chunkTimeoutMs });
   return {
     port,
     stop: (): void => {
@@ -163,7 +198,7 @@ async function handleHttpRequest(
 
   const start = Date.now();
   try {
-    const result = await dispatchCommand(cmd, view);
+    const result = await dispatchCommand(cmd, view, state);
     const durationMs = Date.now() - start;
     log("command_completed", { type: cmd.type, success: true, durationMs });
     if (cmd.type === "screenshot") {
@@ -303,7 +338,16 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
-async function dispatchCommand(cmd: CommandRequest, view: BunMotView): Promise<unknown> {
+async function dispatchCommand(
+  cmd: CommandRequest,
+  view: BunMotView,
+  state: BridgeState,
+): Promise<unknown> {
+  // wait 系は chunk loop 経由 (Electrobun preload 10s WS timeout 回避)。
+  if (isWaitCommand(cmd)) {
+    return await dispatchWaitChunkLoop(cmd, view, state.chunkTimeoutMs);
+  }
+  // wait 系以外は単発 evaluate。
   // 同期エントリ (script 構築 + view メソッド呼び出し) で throw されたら internal_error。
   // 戻り値の Promise が reject した場合は WebView 側の Promise rejection として扱う。
   let scriptPromise: Promise<unknown>;
@@ -316,27 +360,17 @@ async function dispatchCommand(cmd: CommandRequest, view: BunMotView): Promise<u
   return await scriptPromise;
 }
 
-function buildScriptForCommand(cmd: CommandRequest): string {
+// wait 系以外の単発 evaluate 用 script ビルダー。wait 系は dispatchWaitChunkLoop を経由する。
+function buildScriptForCommand(cmd: Exclude<CommandRequest, WaitCommand>): string {
   switch (cmd.type) {
     case "evaluate":
       return buildEvaluateScript(cmd.expression);
-    case "waitForSelector":
-      // §2.6: driver からは常に値が来るが、curl 等の直接呼び出し向けにここで fallback
-      return buildWaitForSelectorScript(cmd.selector, cmd.timeout ?? DEFAULT_TIMEOUT_MS);
     case "getText":
       return buildGetTextScript(cmd.selector);
     case "click":
       return buildClickScript(cmd.selector);
     case "fill":
       return buildFillScript(cmd.selector, cmd.value);
-    case "waitForHidden":
-      return buildWaitForHiddenScript(cmd.selector, cmd.timeout ?? DEFAULT_TIMEOUT_MS);
-    case "waitForText":
-      return buildWaitForTextScript(
-        cmd.selector,
-        cmd.text,
-        cmd.timeout ?? DEFAULT_TIMEOUT_MS,
-      );
     case "isVisible":
       return buildIsVisibleScript(cmd.selector);
     case "getAttribute":
@@ -345,6 +379,113 @@ function buildScriptForCommand(cmd: CommandRequest): string {
       return buildGetLogsScript();
     case "screenshot":
       return buildScreenshotScript({ fullPage: cmd.fullPage ?? true });
+  }
+}
+
+// wait 系コマンドを chunk に分割して繰り返し評価する dispatch ループ。
+// - 1 chunk: WebView 側 chunk script を 1 回 evaluate (`{ matched, elapsed }` で resolve)
+// - matched: true → 既存 wire-format (`{ found: true }` 等) に変換して返す
+// - 全体 timeout 到達 → `__BUNMOT_TIMEOUT__:<selector>:<elapsed>` を throw
+//   (mapErrorToKind が `kind: "timeout"` にマップ → 既存 client / errors と完全互換)
+//
+// 累計 elapsed は **chunkResult.elapsed と実時間 (Date.now()) の大きい方** を加算する:
+// - 実 WebView では chunk script 内 setTimeout が thisChunkMs まで待つため
+//   `chunkResult.elapsed ≈ thisChunkMs` (matched: false の場合) → 12 chunks で 60s 進む
+// - WebView 異常 (elapsed = 0 / 嘘の値) → 実時間 (Date.now() - chunkStart) で進む
+// この設計により mock テストでは chunkResult.elapsed (嘘でも整合性のある値) で進められ、
+// 実 WebView では chunkTimeoutMs ベースで進む。エラーメッセージとログには実時間を使う。
+async function dispatchWaitChunkLoop(
+  cmd: WaitCommand,
+  view: BunMotView,
+  chunkTimeoutMs: number,
+): Promise<unknown> {
+  const totalTimeout = cmd.timeout ?? DEFAULT_TIMEOUT_MS;
+  const selector = cmd.selector;
+  const startedAt = Date.now();
+  let progress = 0;
+  let chunks = 0;
+  for (;;) {
+    const remaining = totalTimeout - progress;
+    if (remaining <= 0) break;
+    const thisChunkMs = Math.min(chunkTimeoutMs, remaining);
+    const chunkStart = Date.now();
+
+    let chunkResult: unknown;
+    try {
+      const script = buildScriptForChunk(cmd, thisChunkMs);
+      chunkResult = await view.rpc.request.evaluateJavascriptWithResponse({ script });
+    } catch (e) {
+      // WebView 内 throw / preload 切断は既存 mapErrorToKind に委ねる (timeout / evaluation_error 等)。
+      throw e;
+    }
+    chunks++;
+
+    if (!isWaitChunkResult(chunkResult)) {
+      throw new InternalDispatchError(
+        new Error(
+          `wait chunk returned unexpected shape: ${JSON.stringify(chunkResult)}`,
+        ),
+      );
+    }
+
+    const realElapsed = Date.now() - chunkStart;
+    // 進捗は WebView 側 elapsed と実時間の大きい方。matched: false なら本来 thisChunkMs 経過しているはず。
+    // 万一 chunkResult.elapsed = 0 でも実時間で 1ms 以上進むので無限ループにならない。
+    const chunkProgress = Math.max(chunkResult.elapsed, realElapsed, 1);
+    progress += chunkProgress;
+
+    log("wait_chunk_completed", {
+      type: cmd.type,
+      selector,
+      matched: chunkResult.matched,
+      chunkElapsedMs: chunkResult.elapsed,
+      totalElapsedMs: Date.now() - startedAt,
+      thisChunkMs,
+    });
+
+    if (chunkResult.matched) {
+      return waitSuccessShape(cmd.type);
+    }
+  }
+
+  const totalElapsedMs = Date.now() - startedAt;
+  log("wait_total_timeout", {
+    type: cmd.type,
+    selector,
+    timeoutMs: totalTimeout,
+    totalElapsedMs,
+    chunks,
+  });
+  // mapErrorToKind が `__BUNMOT_TIMEOUT__:` prefix で `kind: "timeout"` にマップする。
+  // throw する値は文字列 (Promise reject value): client.ts:67-98 の mapErrorResponse が
+  // selector と elapsed を分割して BunMotTimeoutError を構築する。
+  throw `__BUNMOT_TIMEOUT__:${selector}:${totalElapsedMs}`;
+}
+
+function buildScriptForChunk(cmd: WaitCommand, chunkTimeoutMs: number): string {
+  switch (cmd.type) {
+    case "waitForSelector":
+      return buildWaitForSelectorScript(cmd.selector, chunkTimeoutMs);
+    case "waitForHidden":
+      return buildWaitForHiddenScript(cmd.selector, chunkTimeoutMs);
+    case "waitForText":
+      return buildWaitForTextScript(cmd.selector, cmd.text, chunkTimeoutMs);
+  }
+}
+
+function waitSuccessShape(
+  type: WaitCommand["type"],
+):
+  | { found: true }
+  | { hidden: true }
+  | { matched: true } {
+  switch (type) {
+    case "waitForSelector":
+      return { found: true };
+    case "waitForHidden":
+      return { hidden: true };
+    case "waitForText":
+      return { matched: true };
   }
 }
 

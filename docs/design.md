@@ -46,6 +46,18 @@ Playwright's `connectOverCDP()` is structurally incompatible with Electrobun: at
 
 `waitForSelector` and friends are implemented in-page with **MutationObserver** rather than polling. Polling adds latency proportional to the poll interval and burns CPU; MutationObserver fires synchronously on mutation and can be torn down deterministically when a deadline is reached. `requestAnimationFrame` is allowed only as a fallback for cases where MutationObserver doesn't fire (e.g. attribute changes that don't pass the configured filter).
 
+### Why chunk loop, not polling (Electrobun preload 10 s WS limit, #7)
+
+Electrobun 1.16's preload (`internalRpc.request` in `dist-macos-arm64/api/bun/preload/.generated/compiled.ts`) hard-codes a 10-second timeout on every `evaluateJavascriptWithResponse` call. A naive workaround would be to poll `document.querySelector(SELECTOR)` from the bridge every N ms. That avoids the 10 s cap but loses the `MutationObserver` rAF-level latency for short waits — which is the whole reason bun-mot uses observers in the first place.
+
+The bridge instead splits each wait into **chunks** (default 5 s, configurable via `setupBunMot({ chunkTimeoutMs })`) and re-evaluates inside a loop:
+
+- WebView-side scripts always **resolve** (never reject) with `{ matched: boolean, elapsed: number }` within one chunk; chunk timeout is a normal "not yet" result, not a failure.
+- The bridge tracks total progress as `Math.max(chunkResult.elapsed, Date.now() - chunkStart)` per chunk. Real WebView execution honours `chunkTimeoutMs`; mocks (which can't sleep) still advance via the WebView-reported elapsed value, so unit tests run in milliseconds rather than minutes.
+- On overall timeout the bridge synthesizes the legacy `__BUNMOT_TIMEOUT__:<selector>:<elapsed>` reject string and throws it, so `mapErrorToKind` and `BunMotTimeoutError` keep working unchanged.
+
+The chunk loop preserves `MutationObserver` semantics inside each chunk and only pays the cost (tiny RPC roundtrip + observer reset) at chunk boundaries. The driver-facing API and the wire success/error shapes are untouched.
+
 ### Why html2canvas for `screenshot`
 
 The natural choice would have been WKWebView's native `takeSnapshot(with:completionHandler:)`, but Electrobun's public API does not expose it (see [docs/screenshot-strategy.md](screenshot-strategy.md) for the source-dive log). Other candidates considered:
@@ -116,6 +128,7 @@ A running log of the choices that shaped v0.1. Add to this list as new decisions
 | `pass()` always prints, even with `BUN_MOT_LOG=silent` | It's a **user-facing** marker, not a diagnostic. | `src/driver.ts` |
 | Bun-only (`engines.bun`, no `engines.node`) | `dist/*.js` are extensionless ESM that Node cannot resolve; `Bun.serve` / `Bun.spawn` are runtime dependencies. | `package.json`, `dist/*` |
 | Production exclusion via dynamic import + env-var guard | `bun build --env='BUN_MOT_*'` inlines the env identifier; the guard folds to a constant and the dynamic import is dead-code-eliminated. | `test/integration/prod-build.test.ts` (assertion of build output) |
+| Wait commands run as a chunk loop | Electrobun 1.16 preload (`internalRpc.request`) hard-caps each `evaluateJavascriptWithResponse` at 10 s. The bridge issues `chunkTimeoutMs` (default 5 s) chunks and aggregates results so that overall waits are limited only by the user's `timeout`. | `src/bridge.ts`, `src/scripts.ts` |
 
 ---
 

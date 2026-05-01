@@ -296,6 +296,24 @@ Every operation throws a `BunMotError` subclass on failure.
 | `BunMotEvaluationError` | `evaluation_error` | The expression in `evaluate` threw |
 | `BunMotError` (base) | `validation_error` / `internal_error` | Protocol violation / internal bug |
 
+#### Long-running waits (Electrobun preload 10s WS limit)
+
+Electrobun 1.16's preload (`internalRpc.request`) hard-codes a 10-second timeout on every `evaluateJavascriptWithResponse` call. To allow `waitForSelector` / `waitForHidden` / `waitForText` with timeouts greater than 10 seconds, the bun-mot bridge splits each wait into smaller chunks (default 5 s each) and re-evaluates inside a loop. `MutationObserver` reactivity stays intact within each chunk while the overall wait extends to whatever `timeout` you pass on the test side. The driver-side API and the wire format (`{ found: true }`, `BunMotTimeoutError` message) are unchanged.
+
+Tune via `setupBunMot({ chunkTimeoutMs })` on the **app side**:
+
+```typescript
+// app/main.ts
+import { setupBunMot } from "bun-mot/bridge";
+setupBunMot(view, { port, chunkTimeoutMs: 5000 });
+```
+
+| Option | Default | When to change |
+|---|---|---|
+| `chunkTimeoutMs` | `5000` | Lower if Electrobun preload behaviour changes; values above `8000` risk hitting the 10 s preload limit. Must be `> 0`. |
+
+Each chunk emits a `wait_chunk_completed` log line (`type=`, `selector=`, `matched=`, `chunkElapsedMs=`, `totalElapsedMs=`, `thisChunkMs=`); a `wait_total_timeout` line is emitted on overall timeout (`timeoutMs=`, `totalElapsedMs=`, `chunks=`).
+
 ## Console Logs
 
 bun-mot captures `console.log` / `console.warn` / `console.error` from the WebView into an in-memory buffer.

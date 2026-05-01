@@ -13,7 +13,34 @@ import {
   buildEnsurePatchScript,
   buildGetLogsScript,
   buildScreenshotScript,
+  isWaitChunkResult,
 } from "../src/scripts";
+
+describe("isWaitChunkResult", () => {
+  test("正例: { matched: true, elapsed: 100 }", () => {
+    expect(isWaitChunkResult({ matched: true, elapsed: 100 })).toBe(true);
+  });
+
+  test("正例: { matched: false, elapsed: 5000 }", () => {
+    expect(isWaitChunkResult({ matched: false, elapsed: 5000 })).toBe(true);
+  });
+
+  test("反例: { found: true } (旧 wire shape)", () => {
+    expect(isWaitChunkResult({ found: true })).toBe(false);
+  });
+
+  test("反例: null / undefined / プリミティブ", () => {
+    expect(isWaitChunkResult(null)).toBe(false);
+    expect(isWaitChunkResult(undefined)).toBe(false);
+    expect(isWaitChunkResult(42)).toBe(false);
+    expect(isWaitChunkResult("matched")).toBe(false);
+  });
+
+  test("反例: matched が boolean 以外、elapsed が number 以外", () => {
+    expect(isWaitChunkResult({ matched: "true", elapsed: 100 })).toBe(false);
+    expect(isWaitChunkResult({ matched: true, elapsed: "100" })).toBe(false);
+  });
+});
 
 describe("buildEvaluateScript", () => {
   // Electrobun 1.16 builtin RPC は `new Function(script)()` で実行する。
@@ -107,7 +134,7 @@ describe("buildWaitForSelectorScript", () => {
   test("ポーリングパターン (setInterval / setTimeout(check) ループ) が含まれない", () => {
     const script = buildWaitForSelectorScript(".foo", 5000);
     expect(script).not.toMatch(/setInterval/);
-    // setTimeout は timeout reject にしか使わない (ループ不可)
+    // setTimeout は chunk timeout 用 1 回のみ (ループ不可)
     const setTimeoutCount = (script.match(/setTimeout\(/g) ?? []).length;
     expect(setTimeoutCount).toBeLessThanOrEqual(1);
   });
@@ -135,20 +162,25 @@ describe("buildWaitForSelectorScript", () => {
     expect(() => new Function(script)).not.toThrow();
   });
 
-  test("timeout 値が script に埋め込まれる", () => {
+  test("chunkTimeoutMs 値が script に埋め込まれる", () => {
     const script = buildWaitForSelectorScript(".foo", 1234);
     expect(script).toContain("1234");
   });
 
-  test("timeout reject は __BUNMOT_TIMEOUT__ prefix で reject する", () => {
+  test("chunk shape ({ matched, elapsed }) で常に resolve する (reject パスなし)", () => {
     const script = buildWaitForSelectorScript(".foo", 5000);
-    expect(script).toContain("__BUNMOT_TIMEOUT__");
+    // chunk script は __BUNMOT_TIMEOUT__ を持たない (bridge 側で全体 timeout を組み立てる)
+    expect(script).not.toContain("__BUNMOT_TIMEOUT__");
+    expect(script).toContain("matched");
+    expect(script).toContain("elapsed");
   });
 
-  test("found: true で resolve する", () => {
+  test("setTimeout の発火経路が reject ではなく resolve を呼ぶ", () => {
     const script = buildWaitForSelectorScript(".foo", 5000);
-    expect(script).toContain("found");
-    expect(script).toContain("true");
+    // setTimeout のコールバックブロック内で resolve が呼ばれている
+    const setTimeoutBlock = script.match(/setTimeout\(\(\) => \{[\s\S]*?\}, [^)]+\)/)?.[0] ?? "";
+    expect(setTimeoutBlock).toContain("resolve");
+    expect(setTimeoutBlock).not.toContain("reject");
   });
 });
 
@@ -307,15 +339,17 @@ describe("buildWaitForHiddenScript", () => {
     expect(script).toContain("MutationObserver");
   });
 
-  test("__BUNMOT_TIMEOUT__ prefix で timeout reject", () => {
+  test("chunk shape ({ matched, elapsed }) で常に resolve する (reject パスなし)", () => {
     const script = buildWaitForHiddenScript(".x", 1000);
-    expect(script).toContain("__BUNMOT_TIMEOUT__");
+    expect(script).not.toContain("__BUNMOT_TIMEOUT__");
+    expect(script).toContain("matched");
+    expect(script).toContain("elapsed");
   });
 
-  test("hidden: true で resolve する", () => {
+  test("hidden 判定式 (isVisibleFn の否定) を含む", () => {
     const script = buildWaitForHiddenScript(".x", 1000);
-    expect(script).toContain("hidden");
-    expect(script).toContain("true");
+    // predicate body 内に isVisibleFn の否定が組み込まれている
+    expect(script).toContain("isVisibleFn");
   });
 
   test("display / visibility / opacity / rect の判定を含む (isVisible 否定)", () => {
@@ -324,7 +358,7 @@ describe("buildWaitForHiddenScript", () => {
     expect(script).toContain("getBoundingClientRect");
   });
 
-  test("timeout 値が script に埋め込まれる", () => {
+  test("chunkTimeoutMs 値が script に埋め込まれる", () => {
     expect(buildWaitForHiddenScript(".x", 4321)).toContain("4321");
   });
 
@@ -366,22 +400,16 @@ describe("buildWaitForTextScript", () => {
     expect(script).toContain("characterData");
   });
 
-  test("matched: true で resolve する", () => {
+  test("chunk shape ({ matched, elapsed }) で常に resolve する", () => {
     const script = buildWaitForTextScript(
       ".x",
       { kind: "string", value: "hi" },
       1000,
     );
     expect(script).toContain("matched");
-  });
-
-  test("__BUNMOT_TIMEOUT__ prefix で timeout reject", () => {
-    const script = buildWaitForTextScript(
-      ".x",
-      { kind: "string", value: "hi" },
-      1000,
-    );
-    expect(script).toContain("__BUNMOT_TIMEOUT__");
+    expect(script).toContain("elapsed");
+    // chunk script は __BUNMOT_TIMEOUT__ を持たない
+    expect(script).not.toContain("__BUNMOT_TIMEOUT__");
   });
 
   test("script が構文エラーにならない", () => {
