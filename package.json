@@ -1,17 +1,60 @@
 {
   "name": "bun-mot",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "E2E testing driver for Electrobun apps. Playwright-compatible API for asserting on real WebView state via an HTTP bridge.",
+  "license": "MIT",
+  "author": "Yuji Yamamoto",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TBD/bun-mot.git"
+  },
+  "keywords": [
+    "electrobun",
+    "e2e",
+    "testing",
+    "playwright",
+    "bun",
+    "webview"
+  ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./bridge": "./src/bridge.ts",
-    "./launch": "./src/launch.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "default": "./dist/bridge.js"
+    },
+    "./launch": {
+      "types": "./dist/launch.d.ts",
+      "default": "./dist/launch.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "test": "bun test",
+    "test:unit": "bun test test/*.test.ts test/build",
     "test:integration": "bun test test/integration/",
     "fixture:start": "bun run test/fixtures/sample-app/main.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run typecheck && bun run test:unit && bun run build",
+    "mado:smoke": "bun run scripts/smoke-mado.ts"
   },
   "dependencies": {
     "html2canvas": "^1.4.1",

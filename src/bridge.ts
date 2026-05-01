@@ -1,4 +1,3 @@
-import type { Server } from "bun";
 import type { BunMotView, ErrorKind } from "./types";
 import {
   CommandRequestSchema,
@@ -21,6 +20,17 @@ import {
   buildGetLogsScript,
   buildScreenshotScript,
 } from "./scripts";
+
+// `tsconfig.build.json` で `types: []` を採用し、@types/bun の global を含めない方針のため
+// (公開 .d.ts に Bun ランタイム型を漏出させない)、bridge.ts 内で必要最小限の `Bun` 形を inline 宣言する。
+// runtime では Bun が globalThis に存在することが前提 (engines.bun >=1.0.0)。
+declare const Bun: {
+  serve: (opts: {
+    port: number;
+    hostname: string;
+    fetch: (req: Request) => Promise<Response>;
+  }) => { port?: number; stop: (force?: boolean) => void };
+};
 
 export interface SetupBunMotOptions {
   port: number;
@@ -62,7 +72,7 @@ export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotB
     bootstrapPromise: null,
     bootstrappedAtLeastOnce: false,
   };
-  const server: Server<undefined> = Bun.serve({
+  const server = Bun.serve({
     port: opts.port,
     hostname,
     fetch: (req) => handleHttpRequest(req, view, state),

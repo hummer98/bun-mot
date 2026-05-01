@@ -1,6 +1,29 @@
 import { BunMot } from "./driver";
 import { log } from "./logger";
 
+// tsconfig.build.json の `types: []` で @types/bun の global を読み込まない方針のため、
+// 公開 .d.ts への型漏出を防ぎつつ runtime に必要な最小限の global を inline 宣言する。
+// runtime では Bun が `process` / `Buffer` を Node 互換で提供する (engines.bun >=1.0.0)。
+declare const process: {
+  env: Record<string, string | undefined>;
+  cwd(): string;
+};
+
+// Buffer を toString が呼べる程度の最小型として宣言 (Node fallback の dead code 用)。
+type LocalBuffer = { toString(encoding: string): string };
+
+// Node fallback (eval require) で使う最小限の Node ストリーム型。
+// Bun ランタイムでは bun*Adapter のみ実行されるため、これらは dead code 上の型宣言。
+interface LocalNodeReadableStream {
+  setEncoding?(encoding: string): void;
+  on(event: "data", listener: (chunk: string | LocalBuffer) => void): void;
+  on(event: "end", listener: () => void): void;
+}
+
+interface LocalProcessEnv {
+  [key: string]: string | undefined;
+}
+
 /** 起動オプション。spawn・bridge 接続・BunMot 構築を一括で行う。 */
 export interface LaunchOptions {
   /** 起動するアプリの実行ファイルパス (必須)。例: "./test/fixtures/sample-app/main.ts" */
@@ -237,7 +260,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // process.env から undefined 値を除去 (Record<string, string> の制約を満たすため)
-function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+function filterEnv(env: LocalProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (typeof v === "string") result[k] = v;
@@ -300,8 +323,8 @@ const nodeSpawnAdapter: SpawnAdapter = {
         opts: { cwd: string; env: Record<string, string>; stdio: "pipe" },
       ) => {
         pid: number | undefined;
-        stdout: NodeJS.ReadableStream;
-        stderr: NodeJS.ReadableStream;
+        stdout: LocalNodeReadableStream;
+        stderr: LocalNodeReadableStream;
         kill(signal?: string): boolean;
         on(event: "exit", listener: (code: number | null) => void): void;
       };
@@ -501,8 +524,8 @@ async function pumpStream(
 
 interface NodeStreamingProcessInit {
   pid: number;
-  stdoutStream: NodeJS.ReadableStream;
-  stderrStream: NodeJS.ReadableStream;
+  stdoutStream: LocalNodeReadableStream;
+  stderrStream: LocalNodeReadableStream;
   kill: (signal?: number | string) => void;
   exited: Promise<unknown>;
 }
@@ -571,12 +594,12 @@ function wrapNodeStreamingProcess(init: NodeStreamingProcessInit): SpawnedProces
 }
 
 function pumpNodeStream(
-  stream: NodeJS.ReadableStream,
+  stream: LocalNodeReadableStream,
   onLine: (line: string) => void,
 ): void {
   let pending = "";
   stream.setEncoding?.("utf8");
-  stream.on("data", (chunk: string | Buffer) => {
+  stream.on("data", (chunk: string | LocalBuffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
     pending += text;
     let idx: number;
