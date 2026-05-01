@@ -10,6 +10,13 @@
 - `.github/workflows/release.yml`: タグ push (`v*`) で OIDC Trusted Publishing による `npm publish --provenance --access public` を実行し、CHANGELOG から該当バージョンを抽出して GitHub Release を作成する CI
 - `.claude/commands/release.md`: `/release` slash command 用のリリース手順書 (firex 方式)
 - `package.json.scripts.postversion`: `npm version` 実行時に自動で `git push && git push --tags` を行う
+- `README.md` (英語) を追加してデフォルトに。先頭に「Why bun-mot」セクション (動機 + 設計思想 + 名前の由来) を追記
+- `docs/README.ja.md`: 既存の日本語 README を移動し、同じく「なぜ bun-mot か」セクションを追記
+- `docs/design.md`: アーキテクチャ・設計判断を集約した living document (旧 `docs/seed.md` を living 化)。Why HTTP bridge / Why MutationObserver / Why html2canvas / `viewId` 予約理由などを集約
+
+### Removed
+
+- `docs/seed.md`: `docs/design.md` に内容を移行して削除
 
 ### Changed
 

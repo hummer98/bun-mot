@@ -1,6 +1,8 @@
 # bun-mot
 
-E2E testing driver for [Electrobun](https://electrobun.dev/) apps. バンの車検のように、Electrobun アプリを検査する。 🚐✅
+**English** | [日本語](docs/README.ja.md)
+
+E2E testing driver for [Electrobun](https://electrobun.dev/) apps. Like an MOT for your van. 🚐✅
 
 ```typescript
 import { BunMot } from "bun-mot";
@@ -10,21 +12,27 @@ await mot.waitForSelector(".mermaid svg");
 const heading = await mot.getText("h1");
 ```
 
-## インストール
+## Why bun-mot
+
+Electrobun ships with no built-in E2E driver, and the broader ecosystem has nothing general-purpose to fill the gap — search npm, JSR, or GitHub for "Electrobun" plus "test" and you come up empty. Playwright's `connectOverCDP()` doesn't help either: Electrobun's WKWebView lives in an out-of-process iframe model that breaks Playwright's attach-time navigation and clobbers Electrobun's own RPC registration. The closest community efforts (canter, agent-electrobun) are stale or app-specific.
+
+bun-mot fills that hole with a small, borrowed idea: instead of speaking CDP, it ships a tiny HTTP server *into the app under test* and routes commands to the WKWebView through `view.rpc.request.evaluateJavascriptWithResponse(...)`. The test process POSTs typed commands, the bridge evaluates them in the WebView, and results come back as JSON. Test code and application stay loosely coupled, and bun-mot rides on Electrobun's own RPC plumbing rather than a foreign protocol.
+
+The API surface follows Playwright on purpose — `waitForSelector`, `getText`, `click`, `fill`, `screenshot` mean what you expect — so there is nothing new to learn. The name is a small joke: **bun** is the Bun runtime, but it also reads as "van"; **MOT** is the UK's annual roadworthiness test. `mot.pass()` prints 🚐✅ when your van passes its inspection. Deeper design notes live in [docs/design.md](docs/design.md).
+
+## Install
 
 ```bash
 bun add bun-mot
 ```
 
-## 使い方
+## Usage
 
-bun-mot は **アプリ側 (Electrobun アプリ内で動かす HTTP bridge)** と **テスト側 (`BunMot` クライアント)** の 2 つから構成される。
+bun-mot has two halves: an **app-side bridge** (HTTP server inside the Electrobun app) and a **test-side client** (`BunMot`).
 
-### 1. アプリ側: bridge を起動する
+### 1. App side: start the bridge
 
-Electrobun アプリの起動コードに `setupBunMot` を **動的 import + 環境変数ガード**で組み込む。
-これにより Production ビルドでは `bun-mot/bridge` ごと bundle から除去できる
-(詳細は [Production ビルド除外](#production-ビルド除外) を参照)。
+Wire `setupBunMot` into your Electrobun entry point with a **dynamic import + env-var guard**. This keeps `bun-mot/bridge` out of the production bundle (see [Production build exclusion](#production-build-exclusion)).
 
 ```typescript
 // app/main.ts
@@ -34,24 +42,23 @@ const win = new BrowserWindow({
   url: "views://my-app/index.html",
 });
 
-// 動的 import + 環境変数ガード:
-// (1) BUN_MOT_PORT が立っている時だけ bridge を import する
-// (2) bundler が `process.env.BUN_MOT_PORT` を build 時に文字列リテラルへ静的置換すれば、
-//     Production ビルドではガードが定数 false に折り畳まれて dead-code 除去される
+// Dynamic import + env-var guard:
+//   (1) only import the bridge when BUN_MOT_PORT is set
+//   (2) Bun's `--env='BUN_MOT_*'` inlines `process.env.BUN_MOT_PORT` at build time;
+//       in production the guard folds to a constant false and the dead branch is removed.
 if (process.env.BUN_MOT_PORT) {
   const { setupBunMot } = await import("bun-mot/bridge");
   const port = Number(process.env.BUN_MOT_PORT);
   const mot = setupBunMot(win.webview, { port });
-  // launch() 側が読み取るマーカー行 (TOCTOU 回避のため stdout 経由で port を伝える)
+  // The marker line that launch() reads from stdout (avoids a TOCTOU race on the port).
   console.log(`fixture-bridge-ready port=${mot.port}`);
   process.on("SIGTERM", () => mot.stop());
 }
 ```
 
-> **注意**: bracket access (`process.env["BUN_MOT_PORT"]`) ではなく **identifier アクセス** (`process.env.BUN_MOT_PORT`) を使うこと。
-> Bun bundler の `--env='BUN_MOT_*'` による build-time インライン置換は identifier アクセス形式のみを対象とする。
+> **Note**: use **identifier access** (`process.env.BUN_MOT_PORT`), not bracket access (`process.env["BUN_MOT_PORT"]`). Bun's `--env='BUN_MOT_*'` build-time inlining only matches identifier form.
 
-`view` 引数は以下のインタフェースを満たすオブジェクト。Electrobun の `BrowserView` / `webview` がそのまま渡せる。
+The `view` argument is anything that satisfies this shape. Electrobun's `BrowserView` / `webview` already does.
 
 ```typescript
 interface BunMotView {
@@ -63,48 +70,47 @@ interface BunMotView {
 }
 ```
 
-### 2. テスト側: BunMot クライアントから操作する
+### 2. Test side: drive it with `BunMot`
 
 ```typescript
 import { BunMot } from "bun-mot";
 
 const mot = new BunMot({ port: 4747 });
 
-// セレクターが現れるまで待つ (MutationObserver ベース、デフォルト 5000ms)
+// Wait for a selector (MutationObserver-based, default 5000ms)
 await mot.waitForSelector(".mermaid svg");
 
-// テキスト取得
+// Read text
 const heading = await mot.getText("h1");
 
-// 任意の式を評価
+// Evaluate any expression
 const title = await mot.evaluate("document.title");
 
-// スクリーンショット (path 指定でファイル書き出し)
+// Screenshot to file
 await mot.screenshot("./screenshots/result.png");
 
-// path 省略で Buffer を受け取り、画像処理に渡す
+// Or omit the path and pipe the Buffer somewhere
 const { buffer, byteCount } = await mot.screenshot();
 console.log(`captured ${byteCount} bytes`);
 
-// body スコープのみを撮影
+// Body-only capture
 await mot.screenshot("./body-only.png", { fullPage: false });
 
-// 全アサーション成功を user-facing に表示する
+// User-facing pass() — print 🚐✅ when all assertions are green
 await mot.pass("Mermaid renders");
 // → 🚐✅ bun-mot: all assertions passed (Mermaid renders)
 ```
 
-### 3. テスト側: `launch()` でアプリを起動する
+### 3. Test side: spawn the app with `launch()`
 
-`bun-mot/launch` は **アプリ spawn → bridge 接続待ち → BunMot 構築** を 1 行で行う helper。
-bun:test / Vitest の双方からそのまま使える (テストフレームワーク中立)。
+`bun-mot/launch` does **spawn → wait for bridge → build a `BunMot`** in one call. It is test-runner-agnostic and works under both `bun:test` and Vitest.
 
 ```typescript
-// bun:test の例
+// bun:test
 import { test, expect } from "bun:test";
 import { launch } from "bun-mot/launch";
 
-test("ホーム画面の見出しが表示される", async () => {
+test("home heading renders", async () => {
   const { app, mot } = await launch({
     appPath: "./apps/my-app/main.ts",
     readyTimeout: 10_000,
@@ -120,11 +126,11 @@ test("ホーム画面の見出しが表示される", async () => {
 ```
 
 ```typescript
-// Vitest の例 (Vitest は user 側で別途 install してください)
+// Vitest (install vitest in your project separately)
 import { test, expect } from "vitest";
 import { launch } from "bun-mot/launch";
 
-test("ホーム画面の見出しが表示される", async () => {
+test("home heading renders", async () => {
   const { app, mot } = await launch({ appPath: "./apps/my-app/main.ts" });
   try {
     await mot.waitForSelector("h1");
@@ -135,19 +141,18 @@ test("ホーム画面の見出しが表示される", async () => {
 });
 ```
 
-`launch()` の動作:
+What `launch()` does, in order:
 
-1. 子プロセスに `BUN_MOT_PORT` を env で渡す (デフォルト `0` で空きポートを子に決めさせる)。
-2. 子の stdout から `fixture-bridge-ready port=NNNN` 形式のマーカー行を抽出して実 port を確定する (TOCTOU を避けるため `net.createServer(0)` 方式は採らない)。
-3. 抽出した port に TCP 接続が成立したら `BunMot` を構築して返す。
-4. `app.close()` は SIGTERM → 1.5s 経過で SIGKILL。冪等 (二度呼んでも安全)。
+1. Spawns the child with `BUN_MOT_PORT` in env (default `0` so the child picks a free port).
+2. Reads a `fixture-bridge-ready port=NNNN` marker line from the child's stdout to learn the actual port (avoids the TOCTOU window of `net.createServer(0)`).
+3. Confirms TCP connectivity to that port, then constructs `BunMot` and returns it.
+4. `app.close()` issues SIGTERM, falls back to SIGKILL after 1.5s. Idempotent.
 
-`readyTimeout` 経過で reject される場合、エラーメッセージには **経過 ms / 最後の接続先 / stdout・stderr の末尾** が含まれる。
+If `readyTimeout` expires the rejection includes elapsed ms, the last connection target, and the tail of the child's stdout/stderr.
 
-### 4. 複数 view と `view()` の v1 制限
+### 4. Multiple views and the `view()` v1 limitation
 
-Electrobun アプリは **複数の BrowserView** を持てる (各 view は独立した HTML/DOM)。
-`mot.view(name)` は v1 で API シグネチャだけ提供し、リクエスト body に `viewId` を自動で乗せる。
+An Electrobun app can host multiple BrowserViews (each with its own HTML/DOM). `mot.view(name)` is shipped from v1 with the API surface in place, and the request body always carries `viewId`.
 
 ```typescript
 const main = mot.view("main");
@@ -155,146 +160,144 @@ await main.waitForSelector(".mermaid svg");
 const heading = await main.getText("h1");
 ```
 
-`view()` の連鎖は **replace 方式 (最後の name が勝つ)**:
+`view()` chains use **replace semantics** (last name wins):
 
 ```typescript
 mot.view("a").view("b").evaluate("1");
-// 送られる viewId は "b"
+// viewId sent on the wire is "b"
 ```
 
-**v1 制限**: bridge 側は単一 view にしか向かないため、現時点では複数 view への切替は機能しない。
-複数 view 対応は将来の統合テストで実証予定。`view()` API は将来互換のためのプレースホルダ。
+**v1 limitation**: the bridge currently routes to a single view, so view switching has no runtime effect yet. End-to-end multi-view support is on the post-v1 roadmap. The `view()` API is a forward-compatible placeholder.
 
-### 環境変数
+### Environment variables
 
-| 環境変数 | 用途 |
+| Variable | Purpose |
 |---|---|
-| `BUN_MOT_PORT` | bridge を起動するポート番号 (アプリ側 README 例で参照) |
-| `BUN_MOT_LOG=silent` | bun-mot 自身のロギングを抑制 (テスト時に便利) |
+| `BUN_MOT_PORT` | Port the bridge binds to (read by the app side). |
+| `BUN_MOT_LOG=silent` | Suppress bun-mot's own logging (handy in tests). |
 
 ## API
 
 ### `setupBunMot(view, options)`
 
-アプリ側で HTTP bridge を起動する。
+Starts the in-app HTTP bridge.
 
-| 引数 | 型 | 必須 | 説明 |
+| Argument | Type | Required | Description |
 |---|---|---|---|
-| `view` | `BunMotView` | ✓ | `evaluateJavascriptWithResponse` を持つオブジェクト |
-| `options.port` | `number` | ✓ | バインドするポート (`0` でランダム割当) |
-| `options.hostname` | `string` |  | バインド先ホスト (デフォルト `127.0.0.1`) |
+| `view` | `BunMotView` | ✓ | Object exposing `evaluateJavascriptWithResponse`. |
+| `options.port` | `number` | ✓ | Bind port (`0` for an ephemeral one). |
+| `options.hostname` | `string` |  | Bind host (default `127.0.0.1`). |
 
-戻り値: `{ port: number, stop(): void }`
+Returns: `{ port: number, stop(): void }`.
 
 ### `new BunMot(options)`
 
-テスト側のクライアント。
+The test-side client.
 
-| 引数 | 型 | 必須 | 説明 |
+| Argument | Type | Required | Description |
 |---|---|---|---|
-| `options.port` | `number` | ✓ | bridge のポート |
-| `options.hostname` | `string` |  | bridge のホスト (デフォルト `127.0.0.1`) |
-| `options.defaultTimeout` | `number` |  | `waitForSelector` 等のデフォルトタイムアウト (ms, デフォルト `5000`) |
-| `options.viewId` | `string` |  | 複数 view 対応用に予約。指定するとすべてのリクエストに `viewId` フィールドが自動付与される (v1 では bridge は無視) |
+| `options.port` | `number` | ✓ | Bridge port. |
+| `options.hostname` | `string` |  | Bridge host (default `127.0.0.1`). |
+| `options.defaultTimeout` | `number` |  | Default timeout (ms) for `waitForSelector` etc. (default `5000`). |
+| `options.viewId` | `string` |  | Reserved for multi-view support. When set, every request carries this `viewId` (the bridge ignores it in v1). |
 
-#### メソッド
+#### Methods
 
-| メソッド | 説明 | 戻り値 |
+| Method | Description | Returns |
 |---|---|---|
-| `evaluate(expression)` | 任意の式を WebView 上で評価 | `Promise<unknown>` |
-| `waitForSelector(selector, options?)` | セレクターが現れるまで待つ (MutationObserver) | `Promise<void>` |
-| `getText(selector)` | セレクター要素の `textContent` を取得 | `Promise<string>` |
-| `click(selector)` | 要素を `el.click()` する | `Promise<void>` |
-| `fill(selector, value)` | `<input>` / `<textarea>` に値を入力 (native setter + `input` / `change` イベント) | `Promise<void>` |
-| `waitForHidden(selector, options?)` | 要素が非表示 / DOM から消えるまで待つ | `Promise<void>` |
-| `waitForText(selector, text, options?)` | `text` (string または RegExp) が `textContent` に現れるまで待つ | `Promise<void>` |
-| `isVisible(selector)` | 要素が可視か (display / visibility / opacity / 0x0 rect で判定) | `Promise<boolean>` |
-| `getAttribute(selector, attribute)` | 属性値を取得。属性なしは `null` | `Promise<string \| null>` |
-| `getLogs()` | バッファ内の console ログを取得しバッファをクリア | `Promise<ConsoleLogEntry[]>` |
-| `screenshot(path?, options?)` | WebView 内 DOM を PNG として撮影。`path` 指定時はファイル書き出し、省略時は Buffer 返却 | `Promise<{ path, byteCount } \| { buffer, byteCount }>` |
-| `view(name)` | 指定 view にスコープしたハンドルを返す (v1 制限あり、§「複数 view と view() の v1 制限」参照) | `BunMotScopedView` |
-| `pass(message?)` | 🚐✅ bun-mot 合格表示。`Promise<void>` を返すため `await` 必須。`BUN_MOT_LOG=silent` でも常に出力される (user-facing) | `Promise<void>` |
+| `evaluate(expression)` | Evaluate any expression in the WebView | `Promise<unknown>` |
+| `waitForSelector(selector, options?)` | Wait for a selector (MutationObserver) | `Promise<void>` |
+| `getText(selector)` | Read `textContent` | `Promise<string>` |
+| `click(selector)` | Call `el.click()` on the matched element | `Promise<void>` |
+| `fill(selector, value)` | Set `<input>` / `<textarea>` value (native setter + `input` / `change` events) | `Promise<void>` |
+| `waitForHidden(selector, options?)` | Wait until the element is hidden / detached | `Promise<void>` |
+| `waitForText(selector, text, options?)` | Wait until `text` (string or RegExp) appears in `textContent` | `Promise<void>` |
+| `isVisible(selector)` | Visibility check (display / visibility / opacity / 0×0 rect) | `Promise<boolean>` |
+| `getAttribute(selector, attribute)` | Read an attribute, `null` if absent | `Promise<string \| null>` |
+| `getLogs()` | Drain the buffered console log entries | `Promise<ConsoleLogEntry[]>` |
+| `screenshot(path?, options?)` | Capture the WebView DOM as PNG. With `path` writes to disk; without it returns a Buffer. | `Promise<{ path, byteCount } \| { buffer, byteCount }>` |
+| `view(name)` | Return a handle scoped to a named view (see v1 limitation above) | `BunMotScopedView` |
+| `pass(message?)` | 🚐✅ user-facing pass marker. Returns `Promise<void>`, so `await` it. Always prints, even with `BUN_MOT_LOG=silent`. | `Promise<void>` |
 
-`waitFor*` 系の `options.timeout` 未指定時は `defaultTimeout` (`5000ms`) が使われる。
+`waitFor*` methods fall back to `defaultTimeout` (5000ms) when `options.timeout` is omitted.
 
-`screenshot` の `options`:
+`screenshot` options:
 
-| キー | 型 | 既定 | 説明 |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `fullPage` | `boolean` | `true` | `true` で `document.documentElement`、`false` で `document.body` を対象 |
+| `fullPage` | `boolean` | `true` | `true` targets `document.documentElement`; `false` targets `document.body`. |
 
-> Playwright との差異: bun-mot の `screenshot(path?, options?)` は `path` を**第 1 引数の string** として受け取る (Playwright は `screenshot({ path, ... })` の option-bag 形式)。
+> Difference from Playwright: `screenshot(path?, options?)` takes `path` as a **positional first argument** (Playwright uses an option-bag `screenshot({ path, ... })`).
 
-`BunMotScopedView` は `BunMot` と同じコマンドメソッド群 (`evaluate` / `waitForSelector` / `getText` / `click` / `fill` / `waitForHidden` / `waitForText` / `isVisible` / `getAttribute` / `getLogs` / `view`) を持つ。`view()` を chain した場合は **replace 方式** (最後の name が勝つ) で、`mot.view('a').view('b')` の `viewId` は `'b'`。`screenshot` は scoped view では未提供 (v1 では `BunMot` のみで利用可)。
+`BunMotScopedView` exposes the same command methods as `BunMot` (`evaluate` / `waitForSelector` / `getText` / `click` / `fill` / `waitForHidden` / `waitForText` / `isVisible` / `getAttribute` / `getLogs` / `view`). Chained `view()` uses **replace semantics** — `mot.view('a').view('b')` sends `viewId: 'b'`. `screenshot` is not exposed on scoped views in v1 (use `BunMot` directly).
 
 ### `launch(options)` (`bun-mot/launch`)
 
-アプリの spawn から bridge 接続成立、`BunMot` 構築までを一括で行う helper。
+Spawn → wait for bridge → build `BunMot`, in one call.
 
-| 引数 | 型 | 必須 | 説明 |
+| Argument | Type | Required | Description |
 |---|---|---|---|
-| `options.appPath` | `string` | ✓ | 起動する実行ファイルのパス |
-| `options.args` | `string[]` |  | appPath に渡す追加 argv |
-| `options.cwd` | `string` |  | spawn の cwd (デフォルト `process.cwd()`) |
-| `options.env` | `Record<string,string>` |  | 子に渡す env (process.env にマージされる)。`BUN_MOT_PORT` は launch() が自動付与 |
-| `options.port` | `number` |  | bridge port。未指定なら `0` を子に渡し stdout から実 port を読み取る |
-| `options.hostname` | `string` |  | bridge hostname (デフォルト `127.0.0.1`) |
-| `options.readyTimeout` | `number` |  | 接続待ちタイムアウト ms (デフォルト `10000`) |
-| `options.defaultTimeout` | `number` |  | 構築する `BunMot` の `defaultTimeout` |
-| `options.echoOutput` | `boolean` |  | 子の stdout/stderr を test runner にエコーするか (デフォルト `false`) |
-| `options.runtime` | `string` |  | 起動コマンド (デフォルト `"bun"`)。Node 等を使う場合に上書き |
+| `options.appPath` | `string` | ✓ | Executable / entry path to spawn. |
+| `options.args` | `string[]` |  | Extra argv passed to `appPath`. |
+| `options.cwd` | `string` |  | Spawn cwd (default `process.cwd()`). |
+| `options.env` | `Record<string,string>` |  | Extra env merged onto `process.env`. `BUN_MOT_PORT` is added automatically. |
+| `options.port` | `number` |  | Bridge port. Omit (default) and the child picks one; launch reads it from stdout. |
+| `options.hostname` | `string` |  | Bridge host (default `127.0.0.1`). |
+| `options.readyTimeout` | `number` |  | Connection wait, ms (default `10000`). |
+| `options.defaultTimeout` | `number` |  | `defaultTimeout` for the constructed `BunMot`. |
+| `options.echoOutput` | `boolean` |  | Echo child stdout/stderr to the test runner (default `false`). |
+| `options.runtime` | `string` |  | Launcher command (default `"bun"`). Override for Node etc. |
 
-戻り値: `{ app: LaunchedApp, mot: BunMot }`
+Returns: `{ app: LaunchedApp, mot: BunMot }`.
 
-`LaunchedApp` のメソッド:
+`LaunchedApp`:
 
-- `app.close(): Promise<void>` — SIGTERM → 1.5s で SIGKILL。冪等
-- `app.pid: number` — 子プロセスの PID
-- `app.port: number` — 実際に listen している port (stdout から抽出)
-- `app.readStdout() / app.readStderr()` — デバッグ用に capture された出力
+- `app.close(): Promise<void>` — SIGTERM, then SIGKILL after 1.5s. Idempotent.
+- `app.pid: number` — child PID.
+- `app.port: number` — actual listen port (extracted from stdout).
+- `app.readStdout() / app.readStderr()` — captured output for debugging.
 
-#### エラー
+#### Errors
 
-すべての操作は失敗時に `BunMotError` 派生クラスを throw する。
+Every operation throws a `BunMotError` subclass on failure.
 
-| エラークラス | `kind` | 発生条件 |
+| Class | `kind` | Raised when |
 |---|---|---|
-| `BunMotTimeoutError` | `timeout` | `waitForSelector` / `waitForHidden` / `waitForText` がタイムアウト |
-| `BunMotSelectorNotFoundError` | `selector_not_found` | `getText` / `click` / `fill` / `getAttribute` で要素が見つからない |
-| `BunMotElementNotInteractableError` | `element_not_interactable` | `click` 対象が `HTMLElement` でない、`fill` 対象が `<input>` / `<textarea>` でない |
-| `BunMotEvaluationError` | `evaluation_error` | `evaluate` の式が例外を投げた |
-| `BunMotError` (基底) | `validation_error` / `internal_error` | プロトコル違反 / 内部例外 |
+| `BunMotTimeoutError` | `timeout` | `waitForSelector` / `waitForHidden` / `waitForText` time out |
+| `BunMotSelectorNotFoundError` | `selector_not_found` | `getText` / `click` / `fill` / `getAttribute` finds nothing |
+| `BunMotElementNotInteractableError` | `element_not_interactable` | `click` target isn't `HTMLElement`, `fill` target isn't `<input>` / `<textarea>` |
+| `BunMotEvaluationError` | `evaluation_error` | The expression in `evaluate` threw |
+| `BunMotError` (base) | `validation_error` / `internal_error` | Protocol violation / internal bug |
 
 ## Console Logs
 
-bun-mot は WebView 内の `console.log` / `console.warn` / `console.error` を自動で in-memory バッファに記録する。
+bun-mot captures `console.log` / `console.warn` / `console.error` from the WebView into an in-memory buffer.
 
-### 仕様
+### Spec
 
-- **バッファ上限**: 1000 件 (FIFO で古いものから drop)。drop 発生時、`getLogs()` の戻り値先頭に warn エントリ `[bun-mot] dropped N earlier log entries` が挿入される。
-- **patch のタイミング**: bridge 起動後の **最初のコマンド受信時** に lazy 注入される。以降、各コマンド前に存在チェックが走り、navigation / reload で patch が消えていれば自動再注入される。
-- **取得後クリア (consume-on-read)**: `getLogs()` 呼び出し時に内部バッファはクリアされる。
-- **エントリ shape**: `{ level: 'log' | 'warn' | 'error'; message: string; timestamp: number }` (`timestamp` は ms epoch)。
-- **引数の文字列化**: `String(arg)` ベース。object / array は `JSON.stringify` で best-effort、循環参照などは `String(arg)` にフォールバック。
+- **Buffer cap**: 1000 entries (FIFO drop). When entries are dropped, `getLogs()` prepends a warn entry `[bun-mot] dropped N earlier log entries`.
+- **Patch timing**: lazily injected on the **first command** after the bridge starts. Each subsequent command checks for the patch and re-injects after navigation / reload.
+- **Consume on read**: `getLogs()` drains the internal buffer.
+- **Entry shape**: `{ level: 'log' | 'warn' | 'error'; message: string; timestamp: number }` (`timestamp` is ms epoch).
+- **Argument stringification**: `String(arg)` based; objects / arrays go through `JSON.stringify` best-effort, with `String(arg)` as a fallback for cycles.
 
-### 既知の制約
+### Known limitations
 
-- patch 注入前 (= 最初のコマンドの前) の console 出力は捕捉されない。
-- navigation / reload 直後の最初の `getLogs()` は patch 復旧前なので空 + 警告 warn entry を返す。回避策: 他コマンド (例: `mot.evaluate('1')`) を先に 1 回挟むことで再注入が走る。
+- Output before the patch is injected (i.e. before the first command) is not captured.
+- The first `getLogs()` immediately after navigation / reload returns empty plus a warn entry, since the patch has not been re-injected yet. Workaround: call any other command first (e.g. `mot.evaluate('1')`) to trigger re-injection.
 
-### 対象外
+### Out of scope
 
 - `console.info` / `console.debug` / `console.trace`
-- patch 失敗時のクラッシュ伝播 (失敗してもアプリ側の `console.*` は壊れない)
+- Crash propagation on patch failure (failures don't break the app's `console.*`)
 
-## Production ビルド除外
+## Production build exclusion
 
-`bun-mot/bridge` は **テスト時のみ** WebView に同居するためのコード。
-Production ビルドにそのまま入れると **listen ポート / アプリ評価 RPC が露出する**ため、必ず除外する。
+`bun-mot/bridge` is **test-only** code. Including it in a production build exposes a listening port and an `evaluate` RPC, so always exclude it.
 
-### 推奨: 動的 import + 環境変数ガード
+### Recommended: dynamic import + env-var guard
 
-[使い方 §1](#1-アプリ側-bridge-を起動する) で示したパターン。
+The pattern shown in [Usage §1](#1-app-side-start-the-bridge):
 
 ```typescript
 if (process.env.BUN_MOT_PORT) {
@@ -304,36 +307,30 @@ if (process.env.BUN_MOT_PORT) {
 }
 ```
 
-ビルドコマンド:
+Build commands:
 
 ```bash
-# Production (bun-mot を bundle から除去)
+# Production (strip bun-mot from the bundle)
 bun build --target=bun --env='BUN_MOT_*' app/main.ts
 
-# E2E テスト時 (bridge を同居させる)
+# E2E run (keep the bridge in)
 BUN_MOT_PORT=0 bun build --target=bun --env='BUN_MOT_*' app/main.ts
 ```
 
-`--env='BUN_MOT_*'` は `process.env.BUN_MOT_PORT` のような **identifier アクセス**を、build 時の文字列リテラルにインライン置換する。
-未注入時は空文字列に置換され、`if ("")` に折り畳まれて未到達コードが tree-shake される。
+`--env='BUN_MOT_*'` inlines `process.env.BUN_MOT_PORT` (identifier form) as a string literal at build time. With nothing injected it folds to `""`, the `if ("")` branch becomes unreachable, and the import is tree-shaken.
 
-### 実測動作 (Bun bundler, 2026-05 時点)
+### Measured behavior (Bun bundler, 2026-05)
 
-`bun-mot` 自身の `test/integration/prod-build.test.ts` で `bun build --target=bun --env='BUN_MOT_*'`
-(**`--minify` なし**) の dead-code 除去を以下で実証している:
+`test/integration/prod-build.test.ts` exercises `bun build --target=bun --env='BUN_MOT_*'` (**without `--minify`**) and asserts:
 
-| ビルド時 env | 出力 size | `setupBunMot` 識別子 | bridge 内部リテラル (`"command_received"`) |
+| Build env | Output size | `setupBunMot` identifier | Bridge internal literal (`"command_received"`) |
 |---|---|---|---|
-| `BUN_MOT_PORT=""` (未注入) | 141 bytes | **含まれない** | **含まれない** |
-| `BUN_MOT_PORT="4747"` | 約 145 KB | 含まれる | 含まれる |
+| `BUN_MOT_PORT=""` (unset) | 141 bytes | **absent** | **absent** |
+| `BUN_MOT_PORT="4747"` | ~145 KB | present | present |
 
-> `--minify` を併用すると識別子が mangle されて assertion が false-positive を起こすため、
-> 検証時は **minify を外して**識別子ベースで grep すること。
+> With `--minify` identifiers get mangled and the identifier-based assertion gets false positives. Verify with **minify off**.
 
-### 代替パターン
-
-bundler が動的 import の dead-code 除去に対応していない場合や、
-`process.env` インライン置換が使えない場合は、`--define` フラグでの識別子置換を使う。
+### Alternative: `--define` for builders without dynamic-import dead-code elimination
 
 ```typescript
 // app/main.ts
@@ -346,72 +343,60 @@ if (__BUN_MOT_ENABLED__) {
 ```
 
 ```bash
-# Production (識別子を false に置換 → if (false) → 完全削除)
+# Production (substitute identifier with false → if (false) → removed)
 bun build --target=bun --define '__BUN_MOT_ENABLED__=false' app/main.ts
-# (esbuild / Vite でも同様の `--define` / `define` オプションが利用可能)
+# (esbuild and Vite have equivalent --define / define options)
 ```
 
-### 残留チェック (FAQ も参照)
-
-Production bundle を `grep` で簡易確認できる:
+### Quick residual check (also covered in FAQ)
 
 ```bash
-grep -E "setupBunMot|command_received" dist/main.js && echo "残留あり" || echo "OK"
+grep -E "setupBunMot|command_received" dist/main.js && echo "still there" || echo "OK"
 ```
 
 ## FAQ
 
-### Q. Production bundle に bridge が残っていないか確認したい
+### Q. How do I confirm bun-mot is not in my production bundle?
 
-`grep` で識別子と内部リテラルの両方を見る:
+Grep for both the identifier and an internal literal:
 
 ```bash
 grep -E "setupBunMot|command_received|command_validation_failed" dist/main.js
 ```
 
-出力が空であれば除去できている。`--minify` を併用していると識別子が mangle されて確認できないので、
-**検証目的のビルドは minify を外す**こと。
+No output = stripped. Verify with `--minify` off (minified identifiers get mangled and the grep won't match).
 
-### Q. `evaluate` が `await` 付きの式で未解決のまま返ってくる
+### Q. `evaluate` returns the unresolved promise for an `await`-style expression
 
-WebView 側が **`evaluateJavascriptWithResponse` の async (Promise 完了待ち)** に対応していない場合がある。
-bun-mot の WaitFor 系コマンドは内部で Promise を返すスクリプトを生成するため、
-Electrobun 側が同期呼び出しのみだと WaitFor が動作しない可能性がある。
-最新の Electrobun 向けの async 対応版が動いているかを確認すること。
+Some WebViews don't support the async (Promise-completion) form of `evaluateJavascriptWithResponse`. bun-mot's WaitFor commands generate Promise-returning scripts internally, so a synchronous-only Electrobun build can break them. Confirm you are on an Electrobun build with async `evaluateJavascriptWithResponse` support.
 
-### Q. 複数 view (`mot.view("name")`) は使えるか
+### Q. Can I use `mot.view("name")` for multiple views?
 
-API シグネチャは v1 から提供しているが、bridge 側は単一 view にしか向かないため
-**現時点では複数 view への切替は機能しない** (将来互換のためのプレースホルダ)。
-詳細は [§4 複数 view と `view()` の v1 制限](#4-複数-view-と-view-の-v1-制限) を参照。
+The API is shipped from v1, but the bridge routes to a single view, so view switching has no runtime effect yet. The `view()` API is a forward-compatible placeholder. See [§4 Multiple views and the `view()` v1 limitation](#4-multiple-views-and-the-view-v1-limitation).
 
-### Q. `bun-mot/launch` をアプリ本体に import してもよいか
+### Q. Can I import `bun-mot/launch` from my app?
 
-**No**。`bun-mot/launch` は **テスト側専用** helper。アプリ (Electrobun のメインプロセス) からは import しないこと。
-内部で Node fallback (`child_process` の動的 require) を持っており、誤って bundle に含めると無関係なコードがアプリに混入する。
+**No**. `bun-mot/launch` is a **test-side** helper. Don't import it from your Electrobun main process — it carries a Node `child_process` fallback that should never end up in your app bundle.
 
 ## Limitations
 
-- **Bun ランタイム必須**: `bun-mot` は Bun 専用パッケージ (`engines.bun: ">=1.0.0"`)。
-  `dist/` は ES Module (拡張子なし import) で出力されるため Node では解決できず、`Bun.serve` / `Bun.spawn` の存在も前提とする。
-  `package.json` に `engines.node` は意図的に設定していない (Node でも動くと誤解させないため)。
-  `src/launch.ts` 内の Node fallback コード (`eval("require")(...)`) は将来の Node 対応に備えた残置で、現状では実行されない。
-- **`fill`**: `<input>` / `<textarea>` のみサポート。`<select>` / `contenteditable` は未対応。focus は呼ばない (Playwright の `fill` と差異あり)。
-- **`click`**: `el.click()` を呼ぶだけで、actionability check (visible / enabled / stable / 重なり要素) は行わない。SVG 要素は `HTMLElement` でないため `element_not_interactable` になる。
-- **`isVisible`**: 祖先の `opacity` を再帰的にはチェックしない (Playwright と同じ簡略化)。`aria-hidden` も対象外。
-- **`waitForText`**: 要素の出現とテキスト一致を同時に待つため、selector が DOM に存在しない場合も timeout まで待機する (`selector_not_found` を投げない)。
-- **`screenshot`**: 内部で [`html2canvas`](https://html2canvas.hertzen.com/) を WebView に inject する方式。詳細は [docs/screenshot-strategy.md](docs/screenshot-strategy.md) を参照。
-  - ネイティブ chrome (タイトルバー、ツールバー、スクロールバー) は撮影されない
-  - cross-origin の `<iframe>` 内部はレンダリングされない (空 or 代替テキスト)
-  - `backdrop-filter` 等の一部 CSS は再現が完全でない
-  - ピクセル完全な比較を必要とするビジュアルリグレッションには不向き (将来 issue で議論予定)
-  - 初回撮影時のみ html2canvas (約 47KB) の inject 分のオーバーヘッドが乗る (数十〜100ms)
-  - `screenshot` 限定で `test/fixtures/sample-app/` を用いた実機検証は未整備。本リリースではユニットテスト (mock) のみ
-- **コンソールログ**: 上記 "Console Logs > 既知の制約" を参照。
+- **Bun runtime required**: `bun-mot` is a Bun-only package (`engines.bun: ">=1.0.0"`). `dist/` is emitted as ES Modules (extensionless imports), Node cannot resolve them, and the runtime depends on `Bun.serve` / `Bun.spawn`. `engines.node` is intentionally absent so users aren't misled into expecting Node compatibility. The Node fallback in `src/launch.ts` (`eval("require")(...)`) is dormant and reserved for future Node support.
+- **`fill`**: only `<input>` / `<textarea>`. `<select>` and `contenteditable` are not supported. It does not call `focus()` (a deliberate divergence from Playwright's `fill`).
+- **`click`**: invokes `el.click()` only. No actionability check (visible / enabled / stable / overlap). SVG nodes aren't `HTMLElement` and raise `element_not_interactable`.
+- **`isVisible`**: doesn't recurse through ancestor `opacity` (matching Playwright's simplification). `aria-hidden` is not considered.
+- **`waitForText`**: waits for both the element to exist and the text to match, so a missing selector also waits until timeout (no `selector_not_found` thrown).
+- **`screenshot`**: implemented by injecting [`html2canvas`](https://html2canvas.hertzen.com/) into the WebView — see [docs/screenshot-strategy.md](docs/screenshot-strategy.md).
+  - Native chrome (titlebar, toolbar, scrollbars) is not captured.
+  - Cross-origin `<iframe>` content is not rendered.
+  - Some CSS (e.g. `backdrop-filter`) is not perfectly reproduced.
+  - Not suitable for pixel-exact visual regression (a future issue).
+  - First capture pays a one-time html2canvas inject overhead (~47KB, tens to ~100ms).
+  - End-to-end verification of `screenshot` against `test/fixtures/sample-app/` is not in place yet; v0.1 covers it with mocked unit tests only.
+- **Console logs**: see "Console Logs > Known limitations".
 
-## curl による手動検証
+## Manual verification with `curl`
 
-bridge を起動した状態で以下のリクエストを送れる。
+With the bridge running you can poke it directly:
 
 ```bash
 # evaluate
@@ -425,7 +410,7 @@ curl -X POST http://127.0.0.1:4747/command \
   -H "content-type: application/json" \
   -d '{"type":"waitForSelector","selector":".mermaid svg","timeout":5000}'
 # → {"success":true,"result":{"found":true}}
-# → タイムアウトの場合: {"success":false,"error":{"kind":"timeout","message":"__BUNMOT_TIMEOUT__:..."}}
+# → on timeout: {"success":false,"error":{"kind":"timeout","message":"__BUNMOT_TIMEOUT__:..."}}
 
 # getText
 curl -X POST http://127.0.0.1:4747/command \
@@ -458,25 +443,25 @@ curl -X POST http://127.0.0.1:4747/command \
 # → {"success":true,"result":{"dataUrl":"data:image/png;base64,...","byteCount":12345}}
 ```
 
-## 開発
+## Development
 
 ```bash
 bun install
-bun test                      # ユニット + 統合テスト (デフォルト)
-bun run test:unit             # 統合テスト除外 (prepublishOnly でも使われる軽量版)
-bun run test:integration      # sample-app fixture を実 spawn する統合テストのみ
-bun run fixture:start         # sample-app fixture を手動起動 (デバッグ用)
-bun run typecheck             # TypeScript 型チェック (tsc --noEmit)
-bun run build                 # dist/ に .js + .d.ts を tsc でコンパイル
+bun test                      # unit + integration (default)
+bun run test:unit             # unit only (used by prepublishOnly)
+bun run test:integration      # integration only (spawns the sample-app fixture)
+bun run fixture:start         # start the sample-app fixture by hand (for debugging)
+bun run typecheck             # tsc --noEmit
+bun run build                 # compile to dist/ (.js + .d.ts)
 ```
 
-`bun run build` は `tsconfig.build.json` (`compilerOptions.types: []`) を使い、
-公開 `.d.ts` に Bun ランタイム型 (`Server<...>`, `Bun.Subprocess`) が漏出しないようにしている。
+`bun run build` uses `tsconfig.build.json` (`compilerOptions.types: []`) so the public `.d.ts` doesn't leak Bun runtime types (`Server<...>`, `Bun.Subprocess`).
 
-### 設計メモ
+### Design notes
 
-- [`docs/seed.md`](docs/seed.md) は初期設計メモ (歴史的経緯記録)。最新の API 仕様は本 README が正。
+- [`docs/design.md`](docs/design.md) — living document covering architecture and design decisions. The README is the canonical source for the API; design.md is the canonical source for the *why*.
+- [`docs/screenshot-strategy.md`](docs/screenshot-strategy.md) — investigation log + chosen approach for the `screenshot` command.
 
-## ライセンス
+## License
 
 MIT

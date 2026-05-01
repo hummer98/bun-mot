@@ -14,7 +14,7 @@ await mot.screenshot('result.png')
 await mot.pass()  // 🚐✅
 ```
 
-詳細コンセプト: `docs/seed.md` を参照。
+詳細コンセプト・設計判断: `docs/design.md` を参照。
 
 ---
 
