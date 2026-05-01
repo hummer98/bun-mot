@@ -67,7 +67,82 @@ const heading = await mot.getText("h1");
 
 // 任意の式を評価
 const title = await mot.evaluate("document.title");
+
+// 全アサーション成功を user-facing に表示する
+await mot.pass("Mermaid renders");
+// → 🚐✅ bun-mot: all assertions passed (Mermaid renders)
 ```
+
+### 3. テスト側: `launch()` でアプリを起動する
+
+`bun-mot/launch` は **アプリ spawn → bridge 接続待ち → BunMot 構築** を 1 行で行う helper。
+bun:test / Vitest の双方からそのまま使える (テストフレームワーク中立)。
+
+```typescript
+// bun:test の例
+import { test, expect } from "bun:test";
+import { launch } from "bun-mot/launch";
+
+test("ホーム画面の見出しが表示される", async () => {
+  const { app, mot } = await launch({
+    appPath: "./apps/my-app/main.ts",
+    readyTimeout: 10_000,
+  });
+  try {
+    await mot.waitForSelector("h1");
+    expect(await mot.getText("h1")).toBe("Hello");
+    await mot.pass();
+  } finally {
+    await app.close();
+  }
+});
+```
+
+```typescript
+// Vitest の例 (Vitest は user 側で別途 install してください)
+import { test, expect } from "vitest";
+import { launch } from "bun-mot/launch";
+
+test("ホーム画面の見出しが表示される", async () => {
+  const { app, mot } = await launch({ appPath: "./apps/my-app/main.ts" });
+  try {
+    await mot.waitForSelector("h1");
+    expect(await mot.getText("h1")).toBe("Hello");
+  } finally {
+    await app.close();
+  }
+});
+```
+
+`launch()` の動作:
+
+1. 子プロセスに `BUN_MOT_PORT` を env で渡す (デフォルト `0` で空きポートを子に決めさせる)。
+2. 子の stdout から `fixture-bridge-ready port=NNNN` 形式のマーカー行を抽出して実 port を確定する (TOCTOU を避けるため `net.createServer(0)` 方式は採らない)。
+3. 抽出した port に TCP 接続が成立したら `BunMot` を構築して返す。
+4. `app.close()` は SIGTERM → 1.5s 経過で SIGKILL。冪等 (二度呼んでも安全)。
+
+`readyTimeout` 経過で reject される場合、エラーメッセージには **経過 ms / 最後の接続先 / stdout・stderr の末尾** が含まれる。
+
+### 4. 複数 view と `view()` の v1 制限
+
+Electrobun アプリは **複数の BrowserView** を持てる (各 view は独立した HTML/DOM)。
+`mot.view(name)` は v1 で API シグネチャだけ提供し、リクエスト body に `viewId` を自動で乗せる。
+
+```typescript
+const main = mot.view("main");
+await main.waitForSelector(".mermaid svg");
+const heading = await main.getText("h1");
+```
+
+`view()` の連鎖は **replace 方式 (最後の name が勝つ)**:
+
+```typescript
+mot.view("a").view("b").evaluate("1");
+// 送られる viewId は "b"
+```
+
+**v1 制限**: bridge 側は単一 view にしか向かないため、現時点では複数 view への切替は機能しない。
+複数 view 対応は T005 以降の統合テストで実証予定。`view()` API は将来互換のためのプレースホルダ。
 
 ### 環境変数
 
@@ -115,8 +190,38 @@ const title = await mot.evaluate("document.title");
 | `isVisible(selector)` | 要素が可視か (display / visibility / opacity / 0x0 rect で判定) | `Promise<boolean>` |
 | `getAttribute(selector, attribute)` | 属性値を取得。属性なしは `null` | `Promise<string \| null>` |
 | `getLogs()` | バッファ内の console ログを取得しバッファをクリア | `Promise<ConsoleLogEntry[]>` |
+| `view(name)` | 指定 view にスコープしたハンドルを返す (v1 制限あり、§「複数 view と view() の v1 制限」参照) | `BunMotScopedView` |
+| `pass(message?)` | 🚐✅ bun-mot 合格表示。`Promise<void>` を返すため `await` 必須。`BUN_MOT_LOG=silent` でも常に出力される (user-facing) | `Promise<void>` |
 
 `waitFor*` 系の `options.timeout` 未指定時は `defaultTimeout` (`5000ms`) が使われる。
+
+`BunMotScopedView` は `BunMot` と同じコマンドメソッド群 (`evaluate` / `waitForSelector` / `getText` / `click` / `fill` / `waitForHidden` / `waitForText` / `isVisible` / `getAttribute` / `getLogs` / `view`) を持つ。`view()` を chain した場合は **replace 方式** (最後の name が勝つ) で、`mot.view('a').view('b')` の `viewId` は `'b'`。
+
+### `launch(options)` (`bun-mot/launch`)
+
+アプリの spawn から bridge 接続成立、`BunMot` 構築までを一括で行う helper。
+
+| 引数 | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `options.appPath` | `string` | ✓ | 起動する実行ファイルのパス |
+| `options.args` | `string[]` |  | appPath に渡す追加 argv |
+| `options.cwd` | `string` |  | spawn の cwd (デフォルト `process.cwd()`) |
+| `options.env` | `Record<string,string>` |  | 子に渡す env (process.env にマージされる)。`BUN_MOT_PORT` は launch() が自動付与 |
+| `options.port` | `number` |  | bridge port。未指定なら `0` を子に渡し stdout から実 port を読み取る |
+| `options.hostname` | `string` |  | bridge hostname (デフォルト `127.0.0.1`) |
+| `options.readyTimeout` | `number` |  | 接続待ちタイムアウト ms (デフォルト `10000`) |
+| `options.defaultTimeout` | `number` |  | 構築する `BunMot` の `defaultTimeout` |
+| `options.echoOutput` | `boolean` |  | 子の stdout/stderr を test runner にエコーするか (デフォルト `false`) |
+| `options.runtime` | `string` |  | 起動コマンド (デフォルト `"bun"`)。Node 等を使う場合に上書き |
+
+戻り値: `{ app: LaunchedApp, mot: BunMot }`
+
+`LaunchedApp` のメソッド:
+
+- `app.close(): Promise<void>` — SIGTERM → 1.5s で SIGKILL。冪等
+- `app.pid: number` — 子プロセスの PID
+- `app.port: number` — 実際に listen している port (stdout から抽出)
+- `app.readStdout() / app.readStderr()` — デバッグ用に capture された出力
 
 #### エラー
 
@@ -207,8 +312,10 @@ curl -X POST http://127.0.0.1:4747/command \
 
 ```bash
 bun install
-bun test           # ユニットテスト
-bun run typecheck  # TypeScript 型チェック
+bun test               # ユニット + 統合テスト (デフォルト)
+bun test:integration   # sample-app fixture を実 spawn する統合テストのみ
+bun run fixture:start  # sample-app fixture を手動起動 (デバッグ用)
+bun run typecheck      # TypeScript 型チェック
 ```
 
 ## ライセンス

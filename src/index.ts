@@ -1,5 +1,14 @@
-export { BunMot } from "./driver";
-export type { BunMotOptions } from "./driver";
+export { BunMot, BunMotScopedView } from "./driver";
+export type { BunMotOptions, BunMotCommands } from "./driver";
+export { launch } from "./launch";
+export type {
+  LaunchOptions,
+  LaunchedApp,
+  LaunchResult,
+  SpawnAdapter,
+  SpawnedProcess,
+  ConnectAdapter,
+} from "./launch";
 export {
   BunMotError,
   BunMotTimeoutError,

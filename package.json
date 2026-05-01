@@ -4,10 +4,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./bridge": "./src/bridge.ts"
+    "./bridge": "./src/bridge.ts",
+    "./launch": "./src/launch.ts"
   },
   "scripts": {
     "test": "bun test",
+    "test:integration": "bun test test/integration/",
+    "fixture:start": "bun run test/fixtures/sample-app/main.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -34,3 +34,6 @@ coverage/
 
 # Bun
 .bun-cache/
+
+# npm (このリポジトリは bun.lock を公式 lockfile とするため、npm 由来の lockfile は無視)
+package-lock.json
