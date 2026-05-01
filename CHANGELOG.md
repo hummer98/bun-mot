@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `.github/workflows/release.yml`: タグ push (`v*`) で OIDC Trusted Publishing による `npm publish --provenance --access public` を実行し、CHANGELOG から該当バージョンを抽出して GitHub Release を作成する CI
+- `.claude/commands/release.md`: `/release` slash command 用のリリース手順書 (firex 方式)
+- `package.json.scripts.postversion`: `npm version` 実行時に自動で `git push && git push --tags` を行う
+
 ### Changed
 
 - `package.json.repository.url` を確定 (`https://github.com/hummer98/bun-mot.git`)
@@ -13,7 +19,9 @@
 
 ### TODO (publish 前にユーザー確認)
 
-- `npm view bun-mot` で名前衝突がないことを最終確認したうえで `npm publish` を実行する
+- npmjs.com で `bun-mot` を Trusted Publisher として登録 (`hummer98/bun-mot` / workflow `release.yml`)
+- 初版 `v0.1.0` のみ Manual Token 経由でローカル publish (Trusted Publisher は publish 後に登録可能なため)
+- 以降は `/release` で CI 経由の OIDC publish
 
 ## [0.1.0] - 2026-05-01
 
