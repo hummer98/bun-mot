@@ -154,6 +154,36 @@ test("ホーム画面の見出しが表示される", async () => {
 
 `readyTimeout` 経過で reject される場合、エラーメッセージには **経過 ms / 最後の接続先 / stdout・stderr の末尾** が含まれる。
 
+### 3.5. テスト側: `BunMot.attach()` で起動済みアプリに接続する
+
+複合コマンド (例: `bun run build:dev && electrobun dev`) でアプリを起動する場合、`launch()` の「単一バイナリを spawn する」モデルは合わない。アプリは自分で起動して `BUN_MOT_PORT` を設定し、テストからは bridge に接続する:
+
+```bash
+BUN_MOT_PORT=4747 bun run start &
+APP_PID=$!
+trap "kill $APP_PID 2>/dev/null" EXIT
+```
+
+```typescript
+import { BunMot } from "bun-mot";
+
+const mot = await BunMot.attach({ port: 4747 });
+try {
+  await mot.waitForSelector("h1");
+  // ...
+} finally {
+  await mot.dispose(); // クライアントだけ閉じる — アプリプロセスは生かしたまま
+}
+```
+
+`attach()` は `hostname:port` (デフォルト `127.0.0.1`) に対して 50ms 間隔で TCP probe を行い、`timeout` (デフォルト `5000`ms — `launch()` の `readyTimeout` より短いのは spawn overhead を含まないため) 内に成立しなければ `BunMotError(kind: "internal_error")` を throw する。エラーメッセージには経過 ms と最後に試した接続先が含まれる。
+
+`dispose()` は内部フラグを立てるだけで、以降のコマンドは即時 throw する。**プロセスは kill しない**。冪等 (二度呼んでも安全)。
+
+> **Tip**: 並列テストでは `BUN_MOT_PORT` を test 単位で別の値にすると port 衝突を避けられる。エフェメラル port を使う場合は `BUN_MOT_PORT=0` に設定し、アプリの stdout から実 port を読み取る (sample-app fixture の場合は `fixture-bridge-ready port=NNNN` というマーカー行を出力する。本番アプリでも同等の仕組みを設けておくとよい)。
+
+> **注**: `hostname` を typo すると DNS エラーではなく **timeout** として現れる (probe が `timeout` ms 経過するまでリトライし続けるため)。`attach()` が timeout し続ける場合は hostname の typo を疑うとよい。
+
 ### 4. 複数 view と `view()` の v1 制限
 
 Electrobun アプリは **複数の BrowserView** を持てる (各 view は独立した HTML/DOM)。
@@ -207,6 +237,25 @@ mot.view("a").view("b").evaluate("1");
 | `options.hostname` | `string` |  | bridge のホスト (デフォルト `127.0.0.1`) |
 | `options.defaultTimeout` | `number` |  | `waitForSelector` 等のデフォルトタイムアウト (ms, デフォルト `5000`) |
 | `options.viewId` | `string` |  | 複数 view 対応用に予約。指定するとすべてのリクエストに `viewId` フィールドが自動付与される (v1 では bridge は無視) |
+
+### `BunMot.attach(options)`
+
+起動済みの bridge プロセスに接続する static factory。プロセスは attach() の所有外 (dispose 時に kill しない)。
+
+| 引数 | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `options.port` | `number` | ✓ | bridge のポート (1〜65535 の整数)。範囲外・非整数は probe を 1 回も走らせず即時 `BunMotError(kind: "validation_error")` を throw |
+| `options.hostname` | `string` |  | bridge のホスト (デフォルト `127.0.0.1`) |
+| `options.timeout` | `number` |  | 接続成立までのタイムアウト (ms, デフォルト `5000` — `launch()` の `readyTimeout` (10000ms) より短いのは attach は spawn overhead を含まないため) |
+| `options.defaultTimeout` | `number` |  | 接続成立後に構築する `BunMot` の `defaultTimeout` (未指定なら `BunMot` constructor のデフォルト = 現在 `5000`ms) |
+
+戻り値: `Promise<BunMot>`。timeout 時は `BunMotError(kind: "internal_error")`、メッセージは `bun-mot attach timeout after Nms (last attempted: HOST:PORT)`。
+
+### `mot.dispose()`
+
+`Promise<void>`。BunMot を使用済みとしてマークする。以降のコマンド (`evaluate` / `waitForSelector` / `getText` / `click` / `fill` / `waitForHidden` / `waitForText` / `isVisible` / `getAttribute` / `getLogs` / `screenshot`) と `mot.view(name)` は `BunMotError("BunMot has been disposed", "internal_error")` を throw する。**プロセスは kill しない**。冪等 (二度呼んでも安全)。
+
+`mot.pass()` は意図的に dispose の対象外 (bridge 通信を伴わず assertion 結果を console.log するのみ)。`mot.dispose()` 前に取得した `BunMotScopedView` は v1 では親の disposed flag を見ない (新規に `mot.view(name)` を発行しようとした時のみ throw)。
 
 #### メソッド
 

@@ -1,5 +1,7 @@
 import { BunMotClient } from "./client";
 import { BunMotError } from "./errors";
+import { selectConnectAdapter, waitForBridgeReady } from "./launch";
+import type { ConnectAdapter } from "./launch";
 import { log } from "./logger";
 import {
   isClickResult,
@@ -57,6 +59,31 @@ export interface BunMotOptions {
   /** デフォルトタイムアウト (ms)。waitForSelector 等の `timeout` 未指定時に使われる。 */
   defaultTimeout?: number;
 }
+
+/**
+ * `BunMot.attach()` のオプション。Playwright の `chromium.connectOverCDP({ port })` 相当。
+ * launch() と異なり、子プロセスは attach() の所有外 (kill しない)。
+ */
+export interface AttachOptions {
+  /** 接続先 bridge port (必須、整数 1〜65535) */
+  port: number;
+  /** 接続先 hostname (default: "127.0.0.1") */
+  hostname?: string;
+  /**
+   * 接続成立までのタイムアウト (default: 5000ms)。
+   * launch() の readyTimeout (10000ms) より短いのは、attach は spawn overhead を含まないため。
+   */
+  timeout?: number;
+  /** 接続成立後に構築する BunMot の defaultTimeout (未指定なら BunMot constructor のデフォルトに従う) */
+  defaultTimeout?: number;
+  /**
+   * @internal DI 用 (テストで TCP probe を差し替える)。プロダクションでは未指定。
+   * launch の `connectAdapter` と同じ。README API テーブルからは除外する。
+   */
+  connectAdapter?: ConnectAdapter;
+}
+
+const ATTACH_DEFAULT_TIMEOUT_MS = 5000;
 
 // 親 BunMot と BunMotScopedView が同じシグネチャで公開するコマンド集合。
 // T002 が追加したコマンド (click / fill / waitForHidden / waitForText / isVisible /
@@ -132,18 +159,82 @@ export class BunMot implements BunMotCommands {
   private readonly client: BunMotClient;
   private readonly defaultTimeout: number;
   private readonly viewId: string | undefined;
+  /** dispose ログ等で参照する用に constructor で保持する。client.port は private のため。 */
+  private readonly port: number;
+  private disposed = false;
 
   constructor(opts: BunMotOptions) {
     this.client = new BunMotClient(opts.port, opts.hostname ?? "127.0.0.1");
     this.defaultTimeout = opts.defaultTimeout ?? 5000;
     this.viewId = opts.viewId;
+    this.port = opts.port;
+  }
+
+  /**
+   * 既存の bridge プロセスへ接続する static factory。Playwright の
+   * `chromium.connectOverCDP({ port })` 相当。プロセスは attach() の所有外 (kill しない)。
+   *
+   * port は 1〜65535 の整数。範囲外・非整数は probe を 1 回も走らせず即時 validation_error。
+   * timeout (default 5000ms) 内に TCP 接続が成立しなければ internal_error。
+   */
+  static async attach(options: AttachOptions): Promise<BunMot> {
+    const { port } = options;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new BunMotError(`attach: invalid port: ${port}`, "validation_error");
+    }
+    const hostname = options.hostname ?? "127.0.0.1";
+    const timeout = options.timeout ?? ATTACH_DEFAULT_TIMEOUT_MS;
+    const adapter = options.connectAdapter ?? selectConnectAdapter();
+
+    log("attach_started", { port, hostname, timeout });
+    const probe = await waitForBridgeReady(adapter, hostname, port, timeout);
+    if (!probe.ok) {
+      log("error", {
+        event: "attach_timeout",
+        elapsedMs: probe.elapsedMs,
+        port,
+        hostname,
+      });
+      throw new BunMotError(
+        `bun-mot attach timeout after ${probe.elapsedMs}ms (last attempted: ${hostname}:${port})`,
+        "internal_error",
+      );
+    }
+    log("attach_completed", { port, hostname, elapsedMs: probe.elapsedMs });
+    return new BunMot({
+      port,
+      hostname,
+      defaultTimeout: options.defaultTimeout,
+    });
+  }
+
+  /**
+   * BunMot を使用済みとしてマークする。以降の command (`evaluate` 等) と `view()` は
+   * `BunMotError(internal_error, "BunMot has been disposed")` を throw する。
+   * **プロセスは kill しない** (attach() で接続したプロセスはユーザー所有)。
+   *
+   * 二度呼んでも throw しない (idempotent)。
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    log("bunmot_disposed", { port: this.port });
+  }
+
+  /** disposed なら BunMotError(internal_error, "BunMot has been disposed") を throw。 */
+  private throwIfDisposed(): void {
+    if (this.disposed) {
+      throw new BunMotError("BunMot has been disposed", "internal_error");
+    }
   }
 
   async evaluate(expression: string): Promise<EvaluateResult> {
+    this.throwIfDisposed();
     return await sendCommand(this.client, { type: "evaluate", expression }, this.viewId);
   }
 
   async waitForSelector(selector: string, options?: { timeout?: number }): Promise<void> {
+    this.throwIfDisposed();
     const timeout = options?.timeout ?? this.defaultTimeout;
     const result = await sendCommand(
       this.client,
@@ -159,6 +250,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async getText(selector: string): Promise<string> {
+    this.throwIfDisposed();
     const result = await sendCommand(
       this.client,
       { type: "getText", selector },
@@ -174,6 +266,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async click(selector: string): Promise<void> {
+    this.throwIfDisposed();
     const result = await sendCommand(
       this.client,
       { type: "click", selector },
@@ -188,6 +281,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async fill(selector: string, value: string): Promise<void> {
+    this.throwIfDisposed();
     const result = await sendCommand(
       this.client,
       { type: "fill", selector, value },
@@ -202,6 +296,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async waitForHidden(selector: string, options?: { timeout?: number }): Promise<void> {
+    this.throwIfDisposed();
     const timeout = options?.timeout ?? this.defaultTimeout;
     const result = await sendCommand(
       this.client,
@@ -221,6 +316,7 @@ export class BunMot implements BunMotCommands {
     text: string | RegExp,
     options?: { timeout?: number },
   ): Promise<void> {
+    this.throwIfDisposed();
     const timeout = options?.timeout ?? this.defaultTimeout;
     const result = await sendCommand(
       this.client,
@@ -236,6 +332,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async isVisible(selector: string): Promise<boolean> {
+    this.throwIfDisposed();
     const result = await sendCommand(
       this.client,
       { type: "isVisible", selector },
@@ -251,6 +348,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async getAttribute(selector: string, attribute: string): Promise<string | null> {
+    this.throwIfDisposed();
     const result = await sendCommand(
       this.client,
       { type: "getAttribute", selector, attribute },
@@ -276,6 +374,7 @@ export class BunMot implements BunMotCommands {
     path?: string,
     options?: ScreenshotOptions,
   ): Promise<ScreenshotReturn> {
+    this.throwIfDisposed();
     const fullPage = options?.fullPage ?? true;
     const result = await sendCommand(
       this.client,
@@ -314,6 +413,7 @@ export class BunMot implements BunMotCommands {
   }
 
   async getLogs(): Promise<ConsoleLogEntry[]> {
+    this.throwIfDisposed();
     const result = await sendCommand(this.client, { type: "getLogs" }, this.viewId);
     if (!isGetLogsResult(result)) {
       throw new BunMotError(
@@ -330,8 +430,12 @@ export class BunMot implements BunMotCommands {
    *
    * v1 では bridge が単一 view にしか向かないため、複数 view への切替は機能しない。
    * 詳細は README §「複数 view と view() の v1 制限」を参照。
+   *
+   * dispose 後の `view()` 呼び出しは throw する (新しい scoped view の発行は不整合のため禁止)。
+   * 既に取得済みの BunMotScopedView は v1 では親の disposed flag を見ない (将来 v2 で再検討)。
    */
   view(name: string): BunMotScopedView {
+    this.throwIfDisposed();
     return new BunMotScopedView(this.client, this.defaultTimeout, name);
   }
 

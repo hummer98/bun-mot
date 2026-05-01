@@ -188,36 +188,28 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
     );
   }
 
-  // TCP 接続成立までリトライ。
-  const deadline = start + readyTimeout;
-  let lastError: string | undefined;
-  for (;;) {
-    const ok = await connectAdapter.tryConnect(hostname, actualPort);
-    if (ok) {
-      const elapsedMs = Date.now() - start;
-      log("launch_bridge_ready", { port: actualPort, elapsedMs });
-      break;
-    }
-    if (Date.now() >= deadline) {
-      const elapsedMs = Date.now() - start;
-      await child.kill();
-      const stderrTail = tail(child.readStderr(), STDIO_TAIL_BYTES);
-      const stdoutTail = tail(child.readStdout(), STDIO_TAIL_BYTES);
-      log("error", {
-        event: "launch_timeout",
-        elapsedMs,
-        port: actualPort,
-        reason: lastError ?? "tcp_connect_failed",
-      });
-      throw new Error(
-        `bun-mot launch timeout after ${elapsedMs}ms (last attempted: ${hostname}:${actualPort})\n` +
-          `--- stdout (tail ${stdoutTail.length}B) ---\n${stdoutTail}\n` +
-          `--- stderr (tail ${stderrTail.length}B) ---\n${stderrTail}`,
-      );
-    }
-    lastError = "tcp_not_listening";
-    await sleep(READY_RETRY_INTERVAL_MS);
+  // TCP 接続成立までリトライ。helper 経由で probe loop を共通化 (attach() からも同じ helper を使う)。
+  // 経過時間 (helper 内で測定) を加算した「launch 全体の elapsed」をエラーメッセージに使う。
+  const probeStart = Date.now();
+  const probe = await waitForBridgeReady(connectAdapter, hostname, actualPort, readyTimeout);
+  if (!probe.ok) {
+    const elapsedMs = Date.now() - start;
+    await child.kill();
+    const stderrTail = tail(child.readStderr(), STDIO_TAIL_BYTES);
+    const stdoutTail = tail(child.readStdout(), STDIO_TAIL_BYTES);
+    log("error", {
+      event: "launch_timeout",
+      elapsedMs,
+      port: actualPort,
+      reason: "tcp_not_listening",
+    });
+    throw new Error(
+      `bun-mot launch timeout after ${elapsedMs}ms (last attempted: ${hostname}:${actualPort})\n` +
+        `--- stdout (tail ${stdoutTail.length}B) ---\n${stdoutTail}\n` +
+        `--- stderr (tail ${stderrTail.length}B) ---\n${stderrTail}`,
+    );
   }
+  log("launch_bridge_ready", { port: actualPort, elapsedMs: Date.now() - start, probeMs: Date.now() - probeStart });
 
   const mot = new BunMot({
     port: actualPort,
@@ -257,6 +249,35 @@ function tail(s: string, max: number): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * deadlineMs が経過するまで TCP connect を {@link READY_RETRY_INTERVAL_MS}ms 間隔で polling する。
+ * エラーは throw しない。呼び出し側 (launch / attach) が `ok=false` を見て
+ * それぞれ固有のエラーメッセージ (launch: stdout/stderr tail 込み / attach: 短い形式) を組み立てる。
+ *
+ * launch と attach で probe loop を 2 箇所に書くと変更時にバグが分裂するため共通化した helper。
+ *
+ * @internal
+ */
+export async function waitForBridgeReady(
+  adapter: ConnectAdapter,
+  hostname: string,
+  port: number,
+  deadlineMs: number,
+): Promise<{ ok: boolean; elapsedMs: number }> {
+  const start = Date.now();
+  const deadline = start + deadlineMs;
+  for (;;) {
+    const ok = await adapter.tryConnect(hostname, port);
+    if (ok) {
+      return { ok: true, elapsedMs: Date.now() - start };
+    }
+    if (Date.now() >= deadline) {
+      return { ok: false, elapsedMs: Date.now() - start };
+    }
+    await sleep(READY_RETRY_INTERVAL_MS);
+  }
 }
 
 // process.env から undefined 値を除去 (Record<string, string> の制約を満たすため)

@@ -1,5 +1,6 @@
 export { BunMot, BunMotScopedView } from "./driver";
 export type {
+  AttachOptions,
   BunMotOptions,
   BunMotCommands,
   ScreenshotOptions,

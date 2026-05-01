@@ -176,6 +176,36 @@ What `launch()` does, in order:
 
 If `readyTimeout` expires the rejection includes elapsed ms, the last connection target, and the tail of the child's stdout/stderr.
 
+### 3.5. Test side: attach to an already-running app with `BunMot.attach()`
+
+If your app is started by a compound command (e.g. `bun run build:dev && electrobun dev`), `launch()`'s "spawn one binary" model doesn't fit. Start your app yourself with `BUN_MOT_PORT` set, then attach to its bridge from the test:
+
+```bash
+BUN_MOT_PORT=4747 bun run start &
+APP_PID=$!
+trap "kill $APP_PID 2>/dev/null" EXIT
+```
+
+```typescript
+import { BunMot } from "bun-mot";
+
+const mot = await BunMot.attach({ port: 4747 });
+try {
+  await mot.waitForSelector("h1");
+  // ...
+} finally {
+  await mot.dispose(); // closes the client only — leaves your app running
+}
+```
+
+`attach()` polls TCP at `hostname:port` (default `127.0.0.1`) every 50ms until `timeout` (default `5000`ms — shorter than `launch()`'s `readyTimeout` because `attach()` does not include spawn overhead). On timeout it throws `BunMotError(kind: "internal_error")` with the elapsed ms and the last attempted target.
+
+`dispose()` flips an internal flag so subsequent commands throw immediately; it does **not** kill any process. It is idempotent.
+
+> **Tip**: When running tests in parallel, give each test a different `BUN_MOT_PORT` to avoid port conflicts. For ephemeral ports, set `BUN_MOT_PORT=0` and read the port from your app's stdout (the bridge logs `fixture-bridge-ready port=NNNN` in the sample-app fixture; production apps should expose a similar mechanism).
+
+> **Note**: a typo'd `hostname` will surface as a timeout (the probe just keeps retrying until `timeout` elapses) rather than a "DNS not resolvable" error. If `attach()` keeps timing out, double-check the hostname.
+
 ### 4. Multiple views and the `view()` v1 limitation
 
 An Electrobun app can host multiple BrowserViews (each with its own HTML/DOM). `mot.view(name)` is shipped from v1 with the API surface in place, and the request body always carries `viewId`.
@@ -227,6 +257,25 @@ The test-side client.
 | `options.hostname` | `string` |  | Bridge host (default `127.0.0.1`). |
 | `options.defaultTimeout` | `number` |  | Default timeout (ms) for `waitForSelector` etc. (default `5000`). |
 | `options.viewId` | `string` |  | Reserved for multi-view support. When set, every request carries this `viewId` (the bridge ignores it in v1). |
+
+### `BunMot.attach(options)`
+
+Static factory that connects to an already-running bridge process. The child process is **not** owned by `attach()` (no kill on dispose).
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `options.port` | `number` | ✓ | Bridge port (1–65535, integer). Out-of-range or non-integer values throw `BunMotError(kind: "validation_error")` immediately (no probe attempted). |
+| `options.hostname` | `string` |  | Bridge host (default `127.0.0.1`). |
+| `options.timeout` | `number` |  | Connection wait, ms (default `5000`; shorter than `launch()`'s `readyTimeout` of 10000ms because `attach()` does not include spawn overhead). |
+| `options.defaultTimeout` | `number` |  | `defaultTimeout` for the constructed `BunMot` (default applied by the `BunMot` constructor — currently `5000`ms). |
+
+Returns: `Promise<BunMot>`. On timeout throws `BunMotError(kind: "internal_error")` whose message is `bun-mot attach timeout after Nms (last attempted: HOST:PORT)`.
+
+### `mot.dispose()`
+
+`Promise<void>`. Marks the `BunMot` as disposed. Subsequent commands (`evaluate`, `waitForSelector`, `getText`, `click`, `fill`, `waitForHidden`, `waitForText`, `isVisible`, `getAttribute`, `getLogs`, `screenshot`) and `mot.view(name)` throw `BunMotError("BunMot has been disposed", "internal_error")`. Does **not** kill any process. Idempotent (safe to call twice).
+
+`mot.pass()` is intentionally **not** gated by dispose (it only logs the assertion result and does not communicate with the bridge). Already-acquired `BunMotScopedView` instances are not invalidated by `mot.dispose()` in v1; only newly issued `mot.view(name)` calls throw.
 
 #### Methods
 
