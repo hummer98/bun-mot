@@ -23,16 +23,76 @@ export const GetTextRequestSchema = BaseRequestSchema.extend({
   selector: z.string(),
 });
 
+export const ClickRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("click"),
+  selector: z.string(),
+});
+
+export const FillRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("fill"),
+  selector: z.string(),
+  value: z.string(),
+});
+
+export const WaitForHiddenRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("waitForHidden"),
+  selector: z.string(),
+  timeout: z.number().int().positive().optional(),
+});
+
+// waitForText の text は wire-format では JSON にできないため discriminated union で送る。
+export const TextMatcherSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("string"), value: z.string() }),
+  z.object({ kind: z.literal("regex"), source: z.string(), flags: z.string() }),
+]);
+export type TextMatcher = z.infer<typeof TextMatcherSchema>;
+
+export const WaitForTextRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("waitForText"),
+  selector: z.string(),
+  text: TextMatcherSchema,
+  timeout: z.number().int().positive().optional(),
+});
+
+export const IsVisibleRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("isVisible"),
+  selector: z.string(),
+});
+
+export const GetAttributeRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("getAttribute"),
+  selector: z.string(),
+  attribute: z.string().min(1),
+});
+
+export const GetLogsRequestSchema = BaseRequestSchema.extend({
+  type: z.literal("getLogs"),
+});
+
 export const CommandRequestSchema = z.discriminatedUnion("type", [
   EvaluateRequestSchema,
   WaitForSelectorRequestSchema,
   GetTextRequestSchema,
+  ClickRequestSchema,
+  FillRequestSchema,
+  WaitForHiddenRequestSchema,
+  WaitForTextRequestSchema,
+  IsVisibleRequestSchema,
+  GetAttributeRequestSchema,
+  GetLogsRequestSchema,
 ]);
 
 export type CommandRequest = z.infer<typeof CommandRequestSchema>;
 export type EvaluateRequest = z.infer<typeof EvaluateRequestSchema>;
 export type WaitForSelectorRequest = z.infer<typeof WaitForSelectorRequestSchema>;
 export type GetTextRequest = z.infer<typeof GetTextRequestSchema>;
+export type ClickRequest = z.infer<typeof ClickRequestSchema>;
+export type FillRequest = z.infer<typeof FillRequestSchema>;
+export type WaitForHiddenRequest = z.infer<typeof WaitForHiddenRequestSchema>;
+export type WaitForTextRequest = z.infer<typeof WaitForTextRequestSchema>;
+export type IsVisibleRequest = z.infer<typeof IsVisibleRequestSchema>;
+export type GetAttributeRequest = z.infer<typeof GetAttributeRequestSchema>;
+export type GetLogsRequest = z.infer<typeof GetLogsRequestSchema>;
 
 // §2.11: CommandType は CommandRequest["type"] から派生
 export type CommandType = CommandRequest["type"];
@@ -42,6 +102,7 @@ export const ErrorKindSchema = z.enum([
   "timeout",
   "selector_not_found",
   "evaluation_error",
+  "element_not_interactable",
   "internal_error",
 ]);
 

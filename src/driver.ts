@@ -1,8 +1,18 @@
 import { BunMotClient } from "./client";
 import { BunMotError } from "./errors";
-import { isGetTextResult, isWaitForSelectorResult } from "./types";
-import type { EvaluateResult } from "./types";
-import type { CommandRequest } from "./commands";
+import {
+  isClickResult,
+  isFillResult,
+  isGetAttributeResult,
+  isGetLogsResult,
+  isGetTextResult,
+  isIsVisibleResult,
+  isWaitForHiddenResult,
+  isWaitForSelectorResult,
+  isWaitForTextResult,
+} from "./types";
+import type { ConsoleLogEntry, EvaluateResult } from "./types";
+import type { CommandRequest, TextMatcher } from "./commands";
 
 export interface BunMotOptions {
   port: number;
@@ -60,5 +70,129 @@ export class BunMot {
       );
     }
     return result.text;
+  }
+
+  async click(selector: string): Promise<void> {
+    const req: CommandRequest = this.withViewId({ type: "click", selector });
+    const result = await this.client.send(req);
+    if (!isClickResult(result)) {
+      throw new BunMotError(
+        `click: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+  }
+
+  async fill(selector: string, value: string): Promise<void> {
+    const req: CommandRequest = this.withViewId({ type: "fill", selector, value });
+    const result = await this.client.send(req);
+    if (!isFillResult(result)) {
+      throw new BunMotError(
+        `fill: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+  }
+
+  async waitForHidden(selector: string, options?: { timeout?: number }): Promise<void> {
+    const timeout = options?.timeout ?? this.defaultTimeout;
+    const req: CommandRequest = this.withViewId({
+      type: "waitForHidden",
+      selector,
+      timeout,
+    });
+    const result = await this.client.send(req);
+    if (!isWaitForHiddenResult(result)) {
+      throw new BunMotError(
+        `waitForHidden: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+  }
+
+  async waitForText(
+    selector: string,
+    text: string | RegExp,
+    options?: { timeout?: number },
+  ): Promise<void> {
+    const timeout = options?.timeout ?? this.defaultTimeout;
+    const matcher: TextMatcher =
+      text instanceof RegExp
+        ? { kind: "regex", source: text.source, flags: text.flags }
+        : { kind: "string", value: text };
+    const req: CommandRequest = this.withViewId({
+      type: "waitForText",
+      selector,
+      text: matcher,
+      timeout,
+    });
+    const result = await this.client.send(req);
+    if (!isWaitForTextResult(result)) {
+      throw new BunMotError(
+        `waitForText: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+  }
+
+  async isVisible(selector: string): Promise<boolean> {
+    const req: CommandRequest = this.withViewId({ type: "isVisible", selector });
+    const result = await this.client.send(req);
+    if (!isIsVisibleResult(result)) {
+      throw new BunMotError(
+        `isVisible: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+    return result.visible;
+  }
+
+  async getAttribute(selector: string, attribute: string): Promise<string | null> {
+    const req: CommandRequest = this.withViewId({
+      type: "getAttribute",
+      selector,
+      attribute,
+    });
+    const result = await this.client.send(req);
+    if (!isGetAttributeResult(result)) {
+      throw new BunMotError(
+        `getAttribute: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+    return result.value;
+  }
+
+  async getLogs(): Promise<ConsoleLogEntry[]> {
+    const req: CommandRequest = this.withViewId({ type: "getLogs" });
+    const result = await this.client.send(req);
+    if (!isGetLogsResult(result)) {
+      throw new BunMotError(
+        `getLogs: unexpected response shape: ${JSON.stringify(result)}`,
+        "internal_error",
+      );
+    }
+    if (result.patchMissing) {
+      // §3.5 M4: navigation / patch 未済を warn entry 1 件で通知 (空配列の代わり)。
+      return [
+        {
+          level: "warn",
+          message:
+            "[bun-mot] console patch was not active when getLogs was called (page navigation may have reset it)",
+          timestamp: Date.now(),
+        },
+      ];
+    }
+    if (result.droppedCount > 0) {
+      return [
+        {
+          level: "warn",
+          message: `[bun-mot] dropped ${result.droppedCount} earlier log entries`,
+          timestamp: Date.now(),
+        },
+        ...result.entries,
+      ];
+    }
+    return result.entries;
   }
 }

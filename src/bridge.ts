@@ -10,6 +10,15 @@ import {
   buildEvaluateScript,
   buildWaitForSelectorScript,
   buildGetTextScript,
+  buildClickScript,
+  buildFillScript,
+  buildIsVisibleScript,
+  buildGetAttributeScript,
+  buildWaitForHiddenScript,
+  buildWaitForTextScript,
+  buildConsolePatchScript,
+  buildEnsurePatchScript,
+  buildGetLogsScript,
 } from "./scripts";
 
 export interface SetupBunMotOptions {
@@ -39,12 +48,23 @@ class InternalDispatchError extends Error {
   }
 }
 
+interface BridgeState {
+  // §4.1: 初回 console patch inject 用 Promise キャッシュ。並行コマンドで二重 inject されないようにする。
+  bootstrapPromise: Promise<void> | null;
+  // 初回 inject が成功したか。失敗時は ensure script も呼ばない (永続的な patch 不在を許容)。
+  bootstrappedAtLeastOnce: boolean;
+}
+
 export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotBridge {
   const hostname = opts.hostname ?? "127.0.0.1";
+  const state: BridgeState = {
+    bootstrapPromise: null,
+    bootstrappedAtLeastOnce: false,
+  };
   const server: Server<undefined> = Bun.serve({
     port: opts.port,
     hostname,
-    fetch: (req) => handleHttpRequest(req, view),
+    fetch: (req) => handleHttpRequest(req, view, state),
   });
   const port = server.port;
   if (port === undefined) {
@@ -61,7 +81,11 @@ export function setupBunMot(view: BunMotView, opts: SetupBunMotOptions): BunMotB
   };
 }
 
-async function handleHttpRequest(req: Request, view: BunMotView): Promise<Response> {
+async function handleHttpRequest(
+  req: Request,
+  view: BunMotView,
+  state: BridgeState,
+): Promise<Response> {
   const url = new URL(req.url);
 
   if (url.pathname !== "/command") {
@@ -102,6 +126,9 @@ async function handleHttpRequest(req: Request, view: BunMotView): Promise<Respon
 
   log("command_received", commandReceivedFields(cmd));
 
+  // §4.1: dispatchCommand 前に console patch を bootstrap / ensure する。
+  await ensureConsolePatch(view, state);
+
   const start = Date.now();
   try {
     const result = await dispatchCommand(cmd, view);
@@ -117,6 +144,31 @@ async function handleHttpRequest(req: Request, view: BunMotView): Promise<Respon
   }
 }
 
+async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise<void> {
+  if (!state.bootstrapPromise) {
+    state.bootstrapPromise = (async (): Promise<void> => {
+      try {
+        await view.rpc.request.evaluateJavascriptWithResponse(buildConsolePatchScript());
+        state.bootstrappedAtLeastOnce = true;
+        log("console_patch_applied", { phase: "bootstrap" });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        log("console_patch_failed", { phase: "bootstrap", message });
+      }
+    })();
+  }
+  await state.bootstrapPromise;
+
+  if (!state.bootstrappedAtLeastOnce) return;
+  // navigation / reload 復旧用。失敗してもメインコマンド実行は継続。
+  try {
+    await view.rpc.request.evaluateJavascriptWithResponse(buildEnsurePatchScript());
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    log("console_patch_ensure_failed", { message });
+  }
+}
+
 function commandReceivedFields(
   cmd: CommandRequest,
 ): Record<string, string | number | undefined> {
@@ -124,13 +176,45 @@ function commandReceivedFields(
     type: cmd.type,
     viewId: cmd.viewId,
   };
-  if (cmd.type === "evaluate") {
-    base["expression"] = truncate(cmd.expression, EXPRESSION_LOG_TRUNCATE);
-  } else if (cmd.type === "waitForSelector") {
-    base["selector"] = cmd.selector;
-    base["timeout"] = cmd.timeout;
-  } else {
-    base["selector"] = cmd.selector;
+  switch (cmd.type) {
+    case "evaluate":
+      base["expression"] = truncate(cmd.expression, EXPRESSION_LOG_TRUNCATE);
+      break;
+    case "waitForSelector":
+      base["selector"] = cmd.selector;
+      base["timeout"] = cmd.timeout;
+      break;
+    case "getText":
+      base["selector"] = cmd.selector;
+      break;
+    case "click":
+      base["selector"] = cmd.selector;
+      break;
+    case "fill":
+      // §3.3 m4: value はログに出さず valueLength のみ記録 (機密情報保護)
+      base["selector"] = cmd.selector;
+      base["valueLength"] = cmd.value.length;
+      break;
+    case "waitForHidden":
+      base["selector"] = cmd.selector;
+      base["timeout"] = cmd.timeout;
+      break;
+    case "waitForText":
+      // text の中身 (value / source) は記録せず kind のみ
+      base["selector"] = cmd.selector;
+      base["timeout"] = cmd.timeout;
+      base["textKind"] = cmd.text.kind;
+      break;
+    case "isVisible":
+      base["selector"] = cmd.selector;
+      break;
+    case "getAttribute":
+      base["selector"] = cmd.selector;
+      base["attribute"] = cmd.attribute;
+      break;
+    case "getLogs":
+      // 追加フィールドなし
+      break;
   }
   return base;
 }
@@ -161,6 +245,24 @@ function buildScriptForCommand(cmd: CommandRequest): string {
       return buildWaitForSelectorScript(cmd.selector, cmd.timeout ?? DEFAULT_TIMEOUT_MS);
     case "getText":
       return buildGetTextScript(cmd.selector);
+    case "click":
+      return buildClickScript(cmd.selector);
+    case "fill":
+      return buildFillScript(cmd.selector, cmd.value);
+    case "waitForHidden":
+      return buildWaitForHiddenScript(cmd.selector, cmd.timeout ?? DEFAULT_TIMEOUT_MS);
+    case "waitForText":
+      return buildWaitForTextScript(
+        cmd.selector,
+        cmd.text,
+        cmd.timeout ?? DEFAULT_TIMEOUT_MS,
+      );
+    case "isVisible":
+      return buildIsVisibleScript(cmd.selector);
+    case "getAttribute":
+      return buildGetAttributeScript(cmd.selector, cmd.attribute);
+    case "getLogs":
+      return buildGetLogsScript();
   }
 }
 
@@ -169,23 +271,18 @@ function mapErrorToKind(e: unknown): { kind: ErrorKind; message: string } {
   if (e instanceof InternalDispatchError) {
     return { kind: "internal_error", message: e.message };
   }
-  if (typeof e === "string") {
-    if (e.startsWith("__BUNMOT_TIMEOUT__:")) {
-      return { kind: "timeout", message: e };
+  const text = typeof e === "string" ? e : e instanceof Error ? e.message : null;
+  if (text !== null) {
+    if (text.startsWith("__BUNMOT_TIMEOUT__:")) {
+      return { kind: "timeout", message: text };
     }
-    if (e.startsWith("__BUNMOT_SELECTOR_NOT_FOUND__:")) {
-      return { kind: "selector_not_found", message: e };
+    if (text.startsWith("__BUNMOT_SELECTOR_NOT_FOUND__:")) {
+      return { kind: "selector_not_found", message: text };
     }
-    return { kind: "evaluation_error", message: e };
-  }
-  if (e instanceof Error) {
-    if (e.message.startsWith("__BUNMOT_TIMEOUT__:")) {
-      return { kind: "timeout", message: e.message };
+    if (text.startsWith("__BUNMOT_NOT_INTERACTABLE__:")) {
+      return { kind: "element_not_interactable", message: text };
     }
-    if (e.message.startsWith("__BUNMOT_SELECTOR_NOT_FOUND__:")) {
-      return { kind: "selector_not_found", message: e.message };
-    }
-    return { kind: "evaluation_error", message: e.message };
+    return { kind: "evaluation_error", message: text };
   }
   return { kind: "internal_error", message: String(e) };
 }

@@ -1,8 +1,13 @@
 import { describe, expect, test, beforeAll, afterAll, mock } from "bun:test";
 import { setupBunMot } from "../src/bridge";
 import { BunMot } from "../src/driver";
-import type { BunMotView } from "../src/types";
-import { BunMotError } from "../src/errors";
+import type { BunMotView, ConsoleLogEntry } from "../src/types";
+import {
+  BunMotError,
+  BunMotElementNotInteractableError,
+  BunMotSelectorNotFoundError,
+  BunMotTimeoutError,
+} from "../src/errors";
 
 beforeAll(() => {
   process.env["BUN_MOT_LOG"] = "silent";
@@ -18,6 +23,9 @@ type CapturedRequest = {
   selector?: string;
   timeout?: number;
   viewId?: string;
+  value?: string;
+  attribute?: string;
+  text?: { kind: string; value?: string; source?: string; flags?: string };
 };
 
 interface BridgeHarness {
@@ -27,19 +35,21 @@ interface BridgeHarness {
   stop: () => void;
 }
 
+type ResponseImpl =
+  | { success: true; result: unknown }
+  | { success: false; error: { kind: string; message: string } };
+
 // driver から bridge に届いた request body を捕捉するため、
-// HTTP は実際に setupBunMot で起動し、別途リクエスト捕捉用のサーバーをラップする。
-async function startCapturingBridge(evalImpl: EvalImpl): Promise<BridgeHarness> {
+// 独立した capturing server を立てて driver の HTTP を受ける。
+async function startCapturingBridge(
+  evalImpl: EvalImpl,
+  responseFor?: (req: CapturedRequest) => ResponseImpl | undefined,
+): Promise<BridgeHarness> {
   const evalMock = mock(evalImpl);
   const view: BunMotView = {
     rpc: { request: { evaluateJavascriptWithResponse: evalMock } },
   };
-  // setupBunMot は body をそのまま使うため、driver の組み立てが正しいかの検証は
-  // 「mockEvalImpl が呼ばれた script」よりも「driver → bridge 直接 fetch」を見るのが分かりやすい。
-  // ここでは simple wrapper: setupBunMot に渡す view の middleware で body を覗くことができないので、
-  // 代替として driver が使う BunMotClient.send をスパイするのではなく、bridge に届いた request を
-  // 専用の interceptor 経由で取得する。
-  // 実装簡単化のため: setupBunMot ではなく独立した capturing server を立てて driver の HTTP を受ける。
+  void view;
   const requests: CapturedRequest[] = [];
   const server = Bun.serve({
     port: 0,
@@ -51,8 +61,14 @@ async function startCapturingBridge(evalImpl: EvalImpl): Promise<BridgeHarness> 
       }
       const body = (await req.json()) as CapturedRequest;
       requests.push(body);
+      const overridden = responseFor?.(body);
+      if (overridden !== undefined) {
+        return new Response(JSON.stringify(overridden), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       try {
-        // 受け取った body の type に応じて mock を呼ぶ (script は不問)
         const result = await evalMock("dummy");
         return new Response(JSON.stringify({ success: true, result }), {
           status: 200,
@@ -220,5 +236,366 @@ describe("BunMot - end-to-end with bridge", () => {
     const result = await mot.evaluate("'ok'");
     expect(result).toBe("ok");
     bridge.stop();
+  });
+});
+
+describe("BunMot.click", () => {
+  test("click を呼ぶと bridge に { type: 'click', selector } が届く", async () => {
+    const harness = await startCapturingBridge(async () => ({ clicked: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.click(".btn");
+    expect(harness.receivedRequests[0]).toMatchObject({
+      type: "click",
+      selector: ".btn",
+    });
+    harness.stop();
+  });
+
+  test("element_not_interactable kind で BunMotElementNotInteractableError", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: {
+        kind: "element_not_interactable",
+        message: "__BUNMOT_NOT_INTERACTABLE__:.btn:not_html_element",
+      },
+    }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.click(".btn");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotElementNotInteractableError);
+    if (caught instanceof BunMotElementNotInteractableError) {
+      expect(caught.selector).toBe(".btn");
+      expect(caught.reason).toBe("not_html_element");
+    }
+    harness.stop();
+  });
+
+  test("selector_not_found kind で BunMotSelectorNotFoundError", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: {
+        kind: "selector_not_found",
+        message: "__BUNMOT_SELECTOR_NOT_FOUND__:.btn",
+      },
+    }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.click(".btn");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotSelectorNotFoundError);
+    harness.stop();
+  });
+
+  test("予期せぬ shape で BunMotError(internal_error)", async () => {
+    const harness = await startCapturingBridge(async () => ({ wrong: 1 }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.click(".btn");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotError);
+    if (caught instanceof BunMotError) {
+      expect(caught.kind).toBe("internal_error");
+    }
+    harness.stop();
+  });
+});
+
+describe("BunMot.fill", () => {
+  test("value が request body に含まれる", async () => {
+    const harness = await startCapturingBridge(async () => ({ filled: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.fill(".input", "hello");
+    expect(harness.receivedRequests[0]).toMatchObject({
+      type: "fill",
+      selector: ".input",
+      value: "hello",
+    });
+    harness.stop();
+  });
+
+  test("element_not_interactable で BunMotElementNotInteractableError", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: {
+        kind: "element_not_interactable",
+        message: "__BUNMOT_NOT_INTERACTABLE__:.x:not_input_or_textarea",
+      },
+    }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.fill(".x", "v");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotElementNotInteractableError);
+    if (caught instanceof BunMotElementNotInteractableError) {
+      expect(caught.reason).toBe("not_input_or_textarea");
+    }
+    harness.stop();
+  });
+});
+
+describe("BunMot.waitForHidden", () => {
+  test("defaultTimeout が反映される", async () => {
+    const harness = await startCapturingBridge(async () => ({ hidden: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.waitForHidden(".x");
+    expect(harness.receivedRequests[0]).toMatchObject({
+      type: "waitForHidden",
+      selector: ".x",
+      timeout: 5000,
+    });
+    harness.stop();
+  });
+
+  test("options.timeout が上書きする", async () => {
+    const harness = await startCapturingBridge(async () => ({ hidden: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.waitForHidden(".x", { timeout: 1234 });
+    expect(harness.receivedRequests[0]?.timeout).toBe(1234);
+    harness.stop();
+  });
+
+  test("timeout で BunMotTimeoutError (waitForHidden 用メッセージ)", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: { kind: "timeout", message: "__BUNMOT_TIMEOUT__:.x:1000" },
+    }));
+    const mot = new BunMot({ port: harness.port, defaultTimeout: 1000 });
+    let caught: unknown;
+    try {
+      await mot.waitForHidden(".x");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.commandLabel).toBe("waitForHidden");
+      expect(caught.message).toContain("waitForHidden timeout");
+      expect(caught.message).toContain("still visible");
+    }
+    harness.stop();
+  });
+});
+
+describe("BunMot.waitForText", () => {
+  test("string text → wire-format { kind: 'string', value }", async () => {
+    const harness = await startCapturingBridge(async () => ({ matched: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.waitForText(".x", "hello");
+    expect(harness.receivedRequests[0]?.text).toEqual({
+      kind: "string",
+      value: "hello",
+    });
+    harness.stop();
+  });
+
+  test("RegExp → wire-format { kind: 'regex', source, flags }", async () => {
+    const harness = await startCapturingBridge(async () => ({ matched: true }));
+    const mot = new BunMot({ port: harness.port });
+    await mot.waitForText(".x", /h.+/i);
+    expect(harness.receivedRequests[0]?.text).toEqual({
+      kind: "regex",
+      source: "h.+",
+      flags: "i",
+    });
+    harness.stop();
+  });
+
+  test("timeout で BunMotTimeoutError (expectedText 復元 / string)", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: { kind: "timeout", message: "__BUNMOT_TIMEOUT__:.x:1000" },
+    }));
+    const mot = new BunMot({ port: harness.port, defaultTimeout: 1000 });
+    let caught: unknown;
+    try {
+      await mot.waitForText(".x", "expected-text");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.commandLabel).toBe("waitForText");
+      expect(caught.expectedText).toBe("expected-text");
+      expect(caught.message).toContain('"expected-text"');
+    }
+    harness.stop();
+  });
+
+  test("timeout で expectedText が /source/flags 形式で復元される (regex)", async () => {
+    const harness = await startCapturingBridge(async () => null, () => ({
+      success: false,
+      error: { kind: "timeout", message: "__BUNMOT_TIMEOUT__:.x:500" },
+    }));
+    const mot = new BunMot({ port: harness.port, defaultTimeout: 500 });
+    let caught: unknown;
+    try {
+      await mot.waitForText(".x", /h.+/i);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.expectedText).toBe("/h.+/i");
+    }
+    harness.stop();
+  });
+});
+
+describe("BunMot.isVisible", () => {
+  test("boolean を返す (true)", async () => {
+    const harness = await startCapturingBridge(async () => ({ visible: true }));
+    const mot = new BunMot({ port: harness.port });
+    expect(await mot.isVisible(".x")).toBe(true);
+    harness.stop();
+  });
+
+  test("boolean を返す (false)", async () => {
+    const harness = await startCapturingBridge(async () => ({ visible: false }));
+    const mot = new BunMot({ port: harness.port });
+    expect(await mot.isVisible(".x")).toBe(false);
+    harness.stop();
+  });
+
+  test("予期せぬ shape で internal_error", async () => {
+    const harness = await startCapturingBridge(async () => ({ visible: 1 }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.isVisible(".x");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotError);
+    harness.stop();
+  });
+});
+
+describe("BunMot.getAttribute", () => {
+  test("string を返す", async () => {
+    const harness = await startCapturingBridge(async () => ({ value: "abc" }));
+    const mot = new BunMot({ port: harness.port });
+    expect(await mot.getAttribute(".x", "data-id")).toBe("abc");
+    expect(harness.receivedRequests[0]).toMatchObject({
+      type: "getAttribute",
+      selector: ".x",
+      attribute: "data-id",
+    });
+    harness.stop();
+  });
+
+  test("属性なし → null", async () => {
+    const harness = await startCapturingBridge(async () => ({ value: null }));
+    const mot = new BunMot({ port: harness.port });
+    expect(await mot.getAttribute(".x", "data-id")).toBeNull();
+    harness.stop();
+  });
+});
+
+describe("BunMot.getLogs", () => {
+  test("entries をそのまま返す (drop なし / patch あり)", async () => {
+    const entries: ConsoleLogEntry[] = [
+      { level: "log", message: "hi", timestamp: 100 },
+      { level: "warn", message: "uh", timestamp: 200 },
+    ];
+    const harness = await startCapturingBridge(async () => ({
+      entries,
+      droppedCount: 0,
+      patchMissing: false,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const logs = await mot.getLogs();
+    expect(logs).toEqual(entries);
+    harness.stop();
+  });
+
+  test("droppedCount > 0 で先頭に warn entry を挿入", async () => {
+    const entries: ConsoleLogEntry[] = [
+      { level: "log", message: "after-drop", timestamp: 100 },
+    ];
+    const harness = await startCapturingBridge(async () => ({
+      entries,
+      droppedCount: 5,
+      patchMissing: false,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const logs = await mot.getLogs();
+    expect(logs).toHaveLength(2);
+    expect(logs[0]?.level).toBe("warn");
+    expect(logs[0]?.message).toContain("dropped 5");
+    expect(logs[1]).toEqual(entries[0]!);
+    harness.stop();
+  });
+
+  test("patchMissing: true → warn entry 単体配列", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      entries: [],
+      droppedCount: 0,
+      patchMissing: true,
+    }));
+    const mot = new BunMot({ port: harness.port });
+    const logs = await mot.getLogs();
+    expect(logs).toHaveLength(1);
+    expect(logs[0]?.level).toBe("warn");
+    expect(logs[0]?.message).toContain("console patch was not active");
+    harness.stop();
+  });
+
+  test("予期せぬ shape で internal_error", async () => {
+    const harness = await startCapturingBridge(async () => ({ wrong: 1 }));
+    const mot = new BunMot({ port: harness.port });
+    let caught: unknown;
+    try {
+      await mot.getLogs();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotError);
+    if (caught instanceof BunMotError) {
+      expect(caught.kind).toBe("internal_error");
+    }
+    harness.stop();
+  });
+});
+
+describe("BunMot - 新コマンドでも viewId が伝搬される", () => {
+  test("click", async () => {
+    const harness = await startCapturingBridge(async () => ({ clicked: true }));
+    const mot = new BunMot({ port: harness.port, viewId: "v1" });
+    await mot.click(".btn");
+    expect(harness.receivedRequests[0]?.viewId).toBe("v1");
+    harness.stop();
+  });
+
+  test("waitForText", async () => {
+    const harness = await startCapturingBridge(async () => ({ matched: true }));
+    const mot = new BunMot({ port: harness.port, viewId: "v2" });
+    await mot.waitForText(".x", "hi");
+    expect(harness.receivedRequests[0]?.viewId).toBe("v2");
+    harness.stop();
+  });
+
+  test("getLogs", async () => {
+    const harness = await startCapturingBridge(async () => ({
+      entries: [],
+      droppedCount: 0,
+      patchMissing: false,
+    }));
+    const mot = new BunMot({ port: harness.port, viewId: "v3" });
+    await mot.getLogs();
+    expect(harness.receivedRequests[0]?.viewId).toBe("v3");
+    harness.stop();
   });
 });

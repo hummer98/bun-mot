@@ -8,6 +8,7 @@ import {
   BunMotTimeoutError,
   BunMotSelectorNotFoundError,
   BunMotEvaluationError,
+  BunMotElementNotInteractableError,
 } from "../src/errors";
 
 beforeAll(() => {
@@ -152,5 +153,138 @@ describe("BunMotClient - 接続失敗", () => {
       threw = true;
     }
     expect(threw).toBe(true);
+  });
+});
+
+// §5.5 / M2: timeout case 3 種網羅 + element_not_interactable + req.timeout フォールバック
+describe("BunMotClient.send - timeout 拡張 (3 種コマンド)", () => {
+  test("waitForSelector の timeout: 既存メッセージと完全一致", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_TIMEOUT__:.foo:5000";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      await client.send({ type: "waitForSelector", selector: ".foo", timeout: 5000 });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.commandLabel).toBe("waitForSelector");
+      expect(caught.expectedText).toBeUndefined();
+      expect(caught.message).toBe(
+        'waitForSelector timeout: ".foo" not found within 5000ms (elapsed: 5000ms)',
+      );
+    }
+    bridge.stop();
+  });
+
+  test("waitForHidden の timeout: commandLabel='waitForHidden' / 専用メッセージ", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_TIMEOUT__:.x:1000";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      await client.send({ type: "waitForHidden", selector: ".x", timeout: 1000 });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.commandLabel).toBe("waitForHidden");
+      expect(caught.message).toBe(
+        'waitForHidden timeout: ".x" still visible within 1000ms (elapsed: 1000ms)',
+      );
+    }
+    bridge.stop();
+  });
+
+  test("waitForText (string) の timeout: expectedText が value", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_TIMEOUT__:.x:1000";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      await client.send({
+        type: "waitForText",
+        selector: ".x",
+        text: { kind: "string", value: "hello" },
+        timeout: 1000,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.commandLabel).toBe("waitForText");
+      expect(caught.expectedText).toBe("hello");
+      expect(caught.message).toContain('did not match "hello"');
+    }
+    bridge.stop();
+  });
+
+  test("waitForText (regex) の timeout: expectedText が /source/flags", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_TIMEOUT__:.x:200";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      await client.send({
+        type: "waitForText",
+        selector: ".x",
+        text: { kind: "regex", source: "h.+", flags: "i" },
+        timeout: 200,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.expectedText).toBe("/h.+/i");
+      expect(caught.message).toContain('did not match "/h.+/i"');
+    }
+    bridge.stop();
+  });
+
+  test("req.timeout 未指定で 0 にフォールバック", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_TIMEOUT__:.x:9999";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      // timeout を渡さない (curl 経由 + bridge fallback ケース相当)
+      await client.send({ type: "waitForHidden", selector: ".x" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotTimeoutError);
+    if (caught instanceof BunMotTimeoutError) {
+      expect(caught.timeoutMs).toBe(0);
+    }
+    bridge.stop();
+  });
+
+  test("element_not_interactable kind → BunMotElementNotInteractableError", async () => {
+    const bridge = startBridge(async () => {
+      throw "__BUNMOT_NOT_INTERACTABLE__:.x:not_input_or_textarea";
+    });
+    const client = new BunMotClient(bridge.port, "127.0.0.1");
+    let caught: unknown;
+    try {
+      await client.send({ type: "fill", selector: ".x", value: "v" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(BunMotElementNotInteractableError);
+    if (caught instanceof BunMotElementNotInteractableError) {
+      expect(caught.selector).toBe(".x");
+      expect(caught.reason).toBe("not_input_or_textarea");
+    }
+    bridge.stop();
   });
 });

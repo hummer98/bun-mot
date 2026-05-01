@@ -8,6 +8,8 @@ import {
   BunMotTimeoutError,
   BunMotSelectorNotFoundError,
   BunMotEvaluationError,
+  BunMotElementNotInteractableError,
+  type TimeoutCommandLabel,
 } from "./errors";
 import { log } from "./logger";
 
@@ -66,16 +68,42 @@ function mapErrorResponse(res: CommandErrorResponse, req: CommandRequest): BunMo
   const { kind, message } = res.error;
   switch (kind) {
     case "timeout": {
-      // メッセージ形式: __BUNMOT_TIMEOUT__:<selector>:<elapsed>
-      const selector = req.type === "waitForSelector" ? req.selector : extractSelector(message);
-      const timeoutMs =
-        req.type === "waitForSelector" && typeof req.timeout === "number" ? req.timeout : 0;
+      // §3.4 / §7.3: req.type で 3 分岐し expectedText / commandLabel を復元
+      let selector: string;
+      let timeoutMs: number;
+      let expectedText: string | undefined;
+      let commandLabel: TimeoutCommandLabel = "waitForSelector";
+      if (req.type === "waitForSelector") {
+        selector = req.selector;
+        timeoutMs = req.timeout ?? 0;
+      } else if (req.type === "waitForHidden") {
+        selector = req.selector;
+        timeoutMs = req.timeout ?? 0;
+        commandLabel = "waitForHidden";
+      } else if (req.type === "waitForText") {
+        selector = req.selector;
+        timeoutMs = req.timeout ?? 0;
+        commandLabel = "waitForText";
+        expectedText =
+          req.text.kind === "string"
+            ? req.text.value
+            : `/${req.text.source}/${req.text.flags}`;
+      } else {
+        // 他 type で timeout は理論上発生しない (defensive fallback)
+        selector = extractSelector(message);
+        timeoutMs = 0;
+      }
       const elapsedMs = extractElapsed(message);
-      return new BunMotTimeoutError(selector, timeoutMs, elapsedMs);
+      return new BunMotTimeoutError(selector, timeoutMs, elapsedMs, expectedText, commandLabel);
     }
     case "selector_not_found": {
       const selector = "selector" in req ? req.selector : extractSelector(message);
       return new BunMotSelectorNotFoundError(selector, req.type);
+    }
+    case "element_not_interactable": {
+      const selector = "selector" in req ? req.selector : extractSelector(message);
+      const reason = extractInteractableReason(message);
+      return new BunMotElementNotInteractableError(selector, reason);
     }
     case "evaluation_error": {
       const expression = req.type === "evaluate" ? req.expression : "";
@@ -100,4 +128,15 @@ function extractElapsed(message: string): number {
   if (last === undefined) return 0;
   const n = Number(last);
   return Number.isFinite(n) ? n : 0;
+}
+
+// "__BUNMOT_NOT_INTERACTABLE__:<selector>:<reason>" → <reason>
+// selector / reason は Zod でガード済みのため空文字を含むケースは限定的。
+function extractInteractableReason(message: string): string {
+  const PREFIX = "__BUNMOT_NOT_INTERACTABLE__:";
+  if (!message.startsWith(PREFIX)) return "unknown";
+  const rest = message.slice(PREFIX.length);
+  const idx = rest.lastIndexOf(":");
+  if (idx === -1) return "unknown";
+  return rest.slice(idx + 1) || "unknown";
 }

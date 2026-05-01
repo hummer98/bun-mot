@@ -5,5 +5,19 @@ export {
   BunMotTimeoutError,
   BunMotSelectorNotFoundError,
   BunMotEvaluationError,
+  BunMotElementNotInteractableError,
 } from "./errors";
-export type { ErrorKind, BunMotView } from "./types";
+export type { TimeoutCommandLabel } from "./errors";
+export type {
+  ErrorKind,
+  BunMotView,
+  ConsoleLogEntry,
+  ConsoleLogLevel,
+  GetLogsResult,
+  IsVisibleResult,
+  GetAttributeResult,
+  ClickResult,
+  FillResult,
+  WaitForHiddenResult,
+  WaitForTextResult,
+} from "./types";
