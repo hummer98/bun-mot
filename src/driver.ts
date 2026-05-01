@@ -1,5 +1,3 @@
-import { promises as fsp } from "node:fs";
-import { Buffer } from "node:buffer";
 import { BunMotClient } from "./client";
 import { BunMotError } from "./errors";
 import { log } from "./logger";
@@ -17,6 +15,23 @@ import {
 } from "./types";
 import type { ConsoleLogEntry, EvaluateResult } from "./types";
 import type { CommandRequest, TextMatcher } from "./commands";
+
+// `tsconfig.build.json` の `types: []` 方針 (Bun/Node ランタイム型を public .d.ts に漏出させない) を維持するため
+// driver.ts 内で必要最小限の `Buffer` と `Bun.write` を inline 宣言する。
+// runtime では Bun が `Buffer` (Node 互換 global) と `Bun.write` を提供する (engines.bun >=1.0.0)。
+// (bridge.ts の `Bun.serve` と同じ戦略。bun-mot は Bun ランタイム前提のため Node fallback は不要。)
+
+// `Buffer` は `ScreenshotReturn` の公開型に含まれるため interface として宣言する。
+// Node.js の Buffer は Uint8Array のサブクラスなので extends Uint8Array とする。
+interface Buffer extends Uint8Array {}
+declare const Buffer: {
+  from(input: string, encoding: "base64"): Buffer;
+};
+
+// 画面キャプチャをファイルに書き出すためだけに使用する。`fs.writeFile` 互換の挙動 (path 不正で raw throw)。
+declare const Bun: {
+  write(path: string, data: Uint8Array): Promise<number>;
+};
 
 export interface ScreenshotOptions {
   /**
@@ -288,9 +303,9 @@ export class BunMot implements BunMotCommands {
       });
     }
     if (path !== undefined) {
-      // path === "" は Playwright と同様 fs.writeFile が ENOENT で raw throw する。
+      // path === "" は Playwright と同様 Bun.write (内部 fs) が ENOENT 等で raw throw する。
       // bun-mot 側でガードしないのは「意図しない使い方」を呼び出し側責務にする方針。
-      await fsp.writeFile(path, buffer);
+      await Bun.write(path, buffer);
       log("screenshot_saved", { path, byteCount: buffer.byteLength });
       return { path, byteCount: buffer.byteLength };
     }
