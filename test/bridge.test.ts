@@ -12,13 +12,18 @@ afterAll(() => {
   delete process.env["BUN_MOT_LOG"];
 });
 
+// テスト本体は引数を string で受け取りたいので、ここで Electrobun 1.16 の
+// `{ script }` シグネチャから string への adapter を挟む。
 type EvalImpl = (script: string) => Promise<unknown>;
+type MockEval = (params: { script: string }) => Promise<unknown>;
 
 function createMockView(evalImpl: EvalImpl): {
   view: BunMotView;
-  evaluateMock: ReturnType<typeof mock<EvalImpl>>;
+  evaluateMock: ReturnType<typeof mock<MockEval>>;
 } {
-  const evaluateMock = mock(evalImpl);
+  const evaluateMock = mock<MockEval>(async (params: { script: string }) =>
+    evalImpl(params.script),
+  );
   const view: BunMotView = {
     rpc: { request: { evaluateJavascriptWithResponse: evaluateMock } },
   };
@@ -122,7 +127,7 @@ describe("POST /command - 正常系", () => {
     const lastCall = calls[calls.length - 1];
     expect(lastCall).toBeDefined();
     if (lastCall) {
-      expect(lastCall[0]).toContain("5000");
+      expect(lastCall[0]?.script).toContain("5000");
     }
     bridge.stop();
   });
@@ -239,7 +244,7 @@ describe("POST /command - エラーマッピング", () => {
           // 同期的に throw する
           evaluateJavascriptWithResponse: ((): never => {
             throw new Error("internal boom");
-          }) as unknown as (script: string) => Promise<unknown>,
+          }) as unknown as (params: { script: string }) => Promise<unknown>,
         },
       },
     };
@@ -494,7 +499,7 @@ describe("Console patch bootstrap / ensure", () => {
     const calls = evaluateMock.mock.calls;
     // 最初の呼び出しが bootstrap script
     expect(calls.length).toBeGreaterThanOrEqual(2);
-    const first = calls[0]?.[0] as string | undefined;
+    const first = calls[0]?.[0]?.script as string | undefined;
     expect(first).toBeDefined();
     expect(first ?? "").toContain("__BUNMOT_LOGS__");
     expect(first ?? "").toContain("MAX");
@@ -511,7 +516,9 @@ describe("Console patch bootstrap / ensure", () => {
     // 2 回目: ensure (1) + 実コマンド (1) = 2 増。bootstrap は呼ばれない。
     expect(callsAfterSecond - callsAfterFirst).toBe(2);
     // ensure script は !window.__BUNMOT_LOGS__ ガードを持つ
-    const ensureCall = evaluateMock.mock.calls[callsAfterFirst]?.[0] as string | undefined;
+    const ensureCall = evaluateMock.mock.calls[callsAfterFirst]?.[0]?.script as
+      | string
+      | undefined;
     expect(ensureCall ?? "").toContain("!window.__BUNMOT_LOGS__");
     bridge.stop();
   });
@@ -521,7 +528,11 @@ describe("Console patch bootstrap / ensure", () => {
     const view: BunMotView = {
       rpc: {
         request: {
-          evaluateJavascriptWithResponse: async (script: string): Promise<unknown> => {
+          evaluateJavascriptWithResponse: async ({
+            script,
+          }: {
+            script: string;
+          }): Promise<unknown> => {
             callCount++;
             // bootstrap (= 最初の patch script) のみ reject。
             if (
@@ -550,7 +561,11 @@ describe("Console patch bootstrap / ensure", () => {
     const view: BunMotView = {
       rpc: {
         request: {
-          evaluateJavascriptWithResponse: async (script: string): Promise<unknown> => {
+          evaluateJavascriptWithResponse: async ({
+            script,
+          }: {
+            script: string;
+          }): Promise<unknown> => {
             // bootstrap reject
             if (
               script.includes("MAX") &&

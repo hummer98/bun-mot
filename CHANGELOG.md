@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-01
+
+slaido (Electrobun 1.16) からのフィードバック (#1, #2, #3) を反映した緊急バグ修正リリース。
+v0.1.0 は Electrobun 1.16 上で実質的に動作しなかったため、本バージョンを最初に動く版と位置付ける。
+
+### Fixed
+
+- **#1**: `src/scripts.ts` の全 builder が `new Function(script)()` 経由で実行されたとき結果が常に `undefined` になる問題を修正。式を `return (...);` で wrap し、Promise を返すスクリプトも `return new Promise(...);` の形に揃えた。Electrobun 1.16 builtin RPC (`api/browser/index.ts:142`) の handler に整合
+- **#2**: `BunMotView.rpc.request.evaluateJavascriptWithResponse` のシグネチャを Electrobun 1.16 builtin RPC schema (`params: { script: string }`) に揃えた。`src/bridge.ts` の 3 箇所の呼び出しも `{ script }` 形に変更
+
+### Changed (BREAKING)
+
+- `BunMotView` 型: `evaluateJavascriptWithResponse(script: string)` → `evaluateJavascriptWithResponse(params: { script: string })`。Electrobun 1.16 の `webview` を直接渡しているコードには影響なし。独自に `view` を組み立てている場合は要修正
+
+### Documentation
+
+- **#3**: README §1.5 を追加し、mainview 側で `new Electroview({ rpc: Electroview.defineRPC({ handlers: { requests: {}, messages: {} } }) })` の構築が必要なことを明記。`__electrobunSendToHost()` だけ使っているアプリで bun-mot を入れたとき RPC transport が確立されず全リクエストが timeout する症状の hint を併記
+
 ### Added
 
 - `.github/workflows/release.yml`: タグ push (`v*`) で OIDC Trusted Publishing による `npm publish --provenance --access public` を実行し、CHANGELOG から該当バージョンを抽出して GitHub Release を作成する CI
@@ -62,5 +80,6 @@
 - 2026-05-01 に v0.1.0 を npm に publish 済み (https://www.npmjs.com/package/bun-mot/v/0.1.0)
 - Trusted Publisher (`release.yml` 経由の OIDC publish) は v0.1.0 公開後に npmjs.com 側で登録する設計
 
-[Unreleased]: https://github.com/hummer98/bun-mot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hummer98/bun-mot/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/hummer98/bun-mot/releases/tag/v0.1.1
 [0.1.0]: https://github.com/hummer98/bun-mot/releases/tag/v0.1.0

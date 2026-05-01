@@ -19,7 +19,9 @@ afterAll(() => {
   delete process.env["BUN_MOT_LOG"];
 });
 
+// テスト本体は string ベースで evalImpl を書きたいので、ここで adapter を挟む。
 type EvalImpl = (script: string) => Promise<unknown>;
+type MockEval = (params: { script: string }) => Promise<unknown>;
 type CapturedRequest = {
   type: string;
   expression?: string;
@@ -34,7 +36,7 @@ type CapturedRequest = {
 
 interface BridgeHarness {
   port: number;
-  evalMock: ReturnType<typeof mock<EvalImpl>>;
+  evalMock: ReturnType<typeof mock<MockEval>>;
   receivedRequests: CapturedRequest[];
   stop: () => void;
 }
@@ -49,7 +51,9 @@ async function startCapturingBridge(
   evalImpl: EvalImpl,
   responseFor?: (req: CapturedRequest) => ResponseImpl | undefined,
 ): Promise<BridgeHarness> {
-  const evalMock = mock(evalImpl);
+  const evalMock = mock<MockEval>(async (params: { script: string }) =>
+    evalImpl(params.script),
+  );
   const view: BunMotView = {
     rpc: { request: { evaluateJavascriptWithResponse: evalMock } },
   };
@@ -73,7 +77,7 @@ async function startCapturingBridge(
         });
       }
       try {
-        const result = await evalMock("dummy");
+        const result = await evalMock({ script: "dummy" });
         return new Response(JSON.stringify({ success: true, result }), {
           status: 200,
           headers: { "content-type": "application/json" },

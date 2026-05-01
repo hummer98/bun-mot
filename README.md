@@ -58,16 +58,42 @@ if (process.env.BUN_MOT_PORT) {
 
 > **Note**: use **identifier access** (`process.env.BUN_MOT_PORT`), not bracket access (`process.env["BUN_MOT_PORT"]`). Bun's `--env='BUN_MOT_*'` build-time inlining only matches identifier form.
 
-The `view` argument is anything that satisfies this shape. Electrobun's `BrowserView` / `webview` already does.
+The `view` argument is anything that satisfies this shape. Electrobun's `BrowserView` / `webview` already does (the signature matches Electrobun 1.16's builtin RPC).
 
 ```typescript
 interface BunMotView {
   rpc: {
     request: {
-      evaluateJavascriptWithResponse(script: string): Promise<unknown>;
+      evaluateJavascriptWithResponse(params: { script: string }): Promise<unknown>;
     };
   };
 }
+```
+
+### 1.5. App side: initialize `Electroview` in mainview
+
+bun-mot drives the WebView through Electrobun's RPC transport. The transport's request handler (`evaluateJavascriptWithResponse`) is registered by the **`Electroview` constructor on the browser side** — without it, every command from bun-mot times out before it ever reaches your DOM.
+
+If your mainview only uses `__electrobunSendToHost()` style messaging (no bun → browser RPC), you have probably never instantiated `Electroview`. Add it now:
+
+```typescript
+// app/views/mainview/index.ts
+import { Electroview } from "electrobun/view";
+
+new Electroview({
+  rpc: Electroview.defineRPC({ handlers: { requests: {}, messages: {} } }),
+});
+```
+
+If you already define your own request / message handlers, pass them through the same `defineRPC` call.
+
+Symptom you will see if this is missing (from the bridge log):
+
+```
+[bridge_started] port=4747 hostname=127.0.0.1
+[command_received] type=evaluate expression=1+1
+[console_patch_failed] phase=bootstrap message="RPC request timed out."
+[command_completed] type=evaluate success=false durationMs=1002 kind=evaluation_error
 ```
 
 ### 2. Test side: drive it with `BunMot`

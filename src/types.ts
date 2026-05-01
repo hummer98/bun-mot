@@ -12,11 +12,14 @@ export type ErrorKind =
   | "element_not_interactable"
   | "internal_error";
 
-// Electrobun BrowserView の最小インタフェース (ダックタイピング)
+// Electrobun BrowserView の最小インタフェース (ダックタイピング)。
+// Electrobun 1.16 builtin RPC のシグネチャに合わせて `{ script }` オブジェクト形で受け取る
+// (electrobun/api/browser/builtinrpcSchema.ts: `params: { script: string }`)。
+// 直接 `view.webview` を渡せば型整合する想定。
 export interface BunMotView {
   rpc: {
     request: {
-      evaluateJavascriptWithResponse(script: string): Promise<unknown>;
+      evaluateJavascriptWithResponse(params: { script: string }): Promise<unknown>;
     };
   };
 }

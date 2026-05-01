@@ -16,9 +16,85 @@ import {
 } from "../src/scripts";
 
 describe("buildEvaluateScript", () => {
-  test("式をそのまま返す (透過)", () => {
-    expect(buildEvaluateScript("1 + 1")).toBe("1 + 1");
-    expect(buildEvaluateScript("document.title")).toBe("document.title");
+  // Electrobun 1.16 builtin RPC は `new Function(script)()` で実行する。
+  // body に return が無いと結果が常に undefined になるため、`return (expr);` で wrap する。
+  test("式を `return (expr);` で wrap する", () => {
+    expect(buildEvaluateScript("1 + 1")).toBe("return (1 + 1);");
+    expect(buildEvaluateScript("document.title")).toBe("return (document.title);");
+  });
+
+  test("new Function(script)() で評価すると値が返る", () => {
+    expect(new Function(buildEvaluateScript("1 + 1"))()).toBe(2);
+    expect(new Function(buildEvaluateScript("'a' + 'b'"))()).toBe("ab");
+  });
+});
+
+describe("scripts: new Function(script)() で実行可能 (Electrobun 1.16 互換性)", () => {
+  // issue #1 回帰防止: bridge は scripts.ts の戻り値を Electrobun の builtin handler に
+  // そのまま渡し、handler 側で `new Function(script)()` 経由で実行される。
+  // 各 builder は最低限「Promise を返す」もしくは「同期的に値を返す」必要がある。
+  test("buildWaitForSelectorScript は Promise を返す", () => {
+    const result = new Function(buildWaitForSelectorScript(".never", 0))();
+    expect(result).toBeInstanceOf(Promise);
+    // 0ms timeout なので reject されるはずだが、ここでは ID として捨てる
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildGetTextScript は Promise を返す", () => {
+    const result = new Function(buildGetTextScript("h1"))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildClickScript は Promise を返す", () => {
+    const result = new Function(buildClickScript(".btn"))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildFillScript は Promise を返す", () => {
+    const result = new Function(buildFillScript(".x", "v"))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildIsVisibleScript は Promise を返す", () => {
+    const result = new Function(buildIsVisibleScript(".x"))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildGetAttributeScript は Promise を返す", () => {
+    const result = new Function(buildGetAttributeScript(".x", "data-id"))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildWaitForHiddenScript は Promise を返す", () => {
+    const result = new Function(buildWaitForHiddenScript(".x", 0))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildWaitForTextScript は Promise を返す", () => {
+    const result = new Function(
+      buildWaitForTextScript(".x", { kind: "string", value: "v" }, 0),
+    )();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildGetLogsScript は Promise を返す", () => {
+    const result = new Function(buildGetLogsScript())();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
+  });
+
+  test("buildScreenshotScript は Promise を返す", () => {
+    // html2canvas が無い環境では reject されるが、ここでは return 値が Promise であることだけ確認
+    const result = new Function(buildScreenshotScript({ fullPage: true }))();
+    expect(result).toBeInstanceOf(Promise);
+    void (result as Promise<unknown>).catch(() => {});
   });
 });
 

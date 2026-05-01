@@ -20,7 +20,17 @@ afterAll(() => {
 
 function startBridge(evalImpl: (script: string) => Promise<unknown>): BunMotBridge {
   const view: BunMotView = {
-    rpc: { request: { evaluateJavascriptWithResponse: evalImpl } },
+    rpc: {
+      request: {
+        // Electrobun 1.16 builtin RPC は `{ script }` 形で受け取るので、test 側の
+        // string ベース evalImpl をここで adapter する。
+        evaluateJavascriptWithResponse: async ({
+          script,
+        }: {
+          script: string;
+        }): Promise<unknown> => evalImpl(script),
+      },
+    },
   };
   return setupBunMot(view, { port: 0 });
 }
@@ -121,8 +131,9 @@ describe("BunMotClient.send - エラーマッピング", () => {
       rpc: {
         request: {
           evaluateJavascriptWithResponse: ((): never => {
+            // 同期 throw の動作確認用。型は { script } 形でキャストするだけ。
             throw new Error("boom");
-          }) as unknown as (script: string) => Promise<unknown>,
+          }) as unknown as (params: { script: string }) => Promise<unknown>,
         },
       },
     };

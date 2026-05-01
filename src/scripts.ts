@@ -1,6 +1,11 @@
 // WebView (Electrobun) に注入する JS 文字列のビルダー。
 // すべて Promise を返す式として組み立て、evaluateJavascriptWithResponse 経由で resolve/reject させる。
 // reject 文字列は prefix で kind を識別 (§4.4)。
+//
+// 重要: Electrobun 1.16 の builtin extraRequestHandler は `new Function(script)()` で実行する
+// (electrobun/api/browser/index.ts:142)。`new Function(body)()` は body の最後に return 文が
+// 無いと結果が常に undefined になるため、各 builder は **必ず `return ...;` で値を返す形** に
+// すること。consolePatch / ensurePatch のような副作用専用 IIFE のみ return 不要。
 
 import type { TextMatcher } from "./commands";
 
@@ -31,7 +36,7 @@ function buildMutationWaitScript(opts: MutationWaitOpts): string {
   const raf = opts.withRaf
     ? `\n  requestAnimationFrame(() => {\n    if (check()) done();\n  });`
     : "";
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const SELECTOR = ${sel};
   const TIMEOUT = ${t};
   const start = Date.now();
@@ -60,8 +65,9 @@ ${raf}
 }
 
 export function buildEvaluateScript(expression: string): string {
-  // 任意式をそのまま渡す。値は evaluateJavascriptWithResponse が JSON シリアライズして返す。
-  return expression;
+  // 任意式を `return (...)` で wrap して値を返す。new Function(body)() で評価される前提。
+  // 値は evaluateJavascriptWithResponse が JSON シリアライズして返す (Promise なら await される)。
+  return `return (${expression});`;
 }
 
 export function buildWaitForSelectorScript(selector: string, timeout: number): string {
@@ -69,7 +75,7 @@ export function buildWaitForSelectorScript(selector: string, timeout: number): s
   // rAF フォールバック 1 回のみ許容。
   const sel = JSON.stringify(selector);
   const t = String(timeout);
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const SELECTOR = ${sel};
   const TIMEOUT = ${t};
   const start = Date.now();
@@ -102,7 +108,7 @@ export function buildWaitForSelectorScript(selector: string, timeout: number): s
 
 export function buildGetTextScript(selector: string): string {
   const sel = JSON.stringify(selector);
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const el = document.querySelector(${sel});
   if (!el) { reject('__BUNMOT_SELECTOR_NOT_FOUND__:' + ${sel}); return; }
   resolve({ text: el.textContent ?? '' });
@@ -111,7 +117,7 @@ export function buildGetTextScript(selector: string): string {
 
 export function buildClickScript(selector: string): string {
   const sel = JSON.stringify(selector);
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const el = document.querySelector(${sel});
   if (!el) { reject('__BUNMOT_SELECTOR_NOT_FOUND__:' + ${sel}); return; }
   if (!(el instanceof HTMLElement)) {
@@ -126,7 +132,7 @@ export function buildClickScript(selector: string): string {
 export function buildFillScript(selector: string, value: string): string {
   const sel = JSON.stringify(selector);
   const val = JSON.stringify(value);
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const el = document.querySelector(${sel});
   if (!el) { reject('__BUNMOT_SELECTOR_NOT_FOUND__:' + ${sel}); return; }
   const isInput = el instanceof HTMLInputElement;
@@ -169,7 +175,7 @@ function isVisibleJsExpr(): string {
 
 export function buildIsVisibleScript(selector: string): string {
   const sel = JSON.stringify(selector);
-  return `new Promise((resolve) => {
+  return `return new Promise((resolve) => {
   const isVisibleFn = ${isVisibleJsExpr()};
   const el = document.querySelector(${sel});
   resolve({ visible: isVisibleFn(el) });
@@ -179,7 +185,7 @@ export function buildIsVisibleScript(selector: string): string {
 export function buildGetAttributeScript(selector: string, attribute: string): string {
   const sel = JSON.stringify(selector);
   const attr = JSON.stringify(attribute);
-  return `new Promise((resolve, reject) => {
+  return `return new Promise((resolve, reject) => {
   const el = document.querySelector(${sel});
   if (!el) { reject('__BUNMOT_SELECTOR_NOT_FOUND__:' + ${sel}); return; }
   const v = el.getAttribute(${attr});
@@ -291,7 +297,7 @@ export function buildEnsurePatchScript(): string {
 }
 
 export function buildGetLogsScript(): string {
-  return `new Promise((resolve) => {
+  return `return new Promise((resolve) => {
   const buf = window.__BUNMOT_LOGS__;
   if (!buf || typeof buf.drain !== 'function') {
     resolve({ entries: [], droppedCount: 0, patchMissing: true });
@@ -309,7 +315,7 @@ export function buildScreenshotScript(opts: { fullPage: boolean }): string {
   const target = opts.fullPage ? "document.documentElement" : "document.body";
   // html2canvasSource はライブラリ本体 (UMD)。eval すると window.html2canvas を立ち上げる。
   // ソース内でのシングルクォート / バッククォートは UMD バンドルの構造を壊さないようそのまま埋め込む。
-  return `(async () => {
+  return `return (async () => {
   if (!window.__bunmot_html2canvas) {
     ${html2canvasSource};
     window.__bunmot_html2canvas = window.html2canvas;
@@ -324,5 +330,5 @@ export function buildScreenshotScript(opts: { fullPage: boolean }): string {
   const PREFIX_LEN = "data:image/png;base64,".length;
   const byteCount = Math.floor((dataUrl.length - PREFIX_LEN) * 3 / 4);
   return { dataUrl: dataUrl, byteCount: byteCount };
-})()`;
+})();`;
 }

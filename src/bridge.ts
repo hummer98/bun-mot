@@ -184,7 +184,7 @@ async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise
   if (!state.bootstrapPromise) {
     state.bootstrapPromise = (async (): Promise<void> => {
       try {
-        await view.rpc.request.evaluateJavascriptWithResponse(buildConsolePatchScript());
+        await view.rpc.request.evaluateJavascriptWithResponse({ script: buildConsolePatchScript() });
         state.bootstrappedAtLeastOnce = true;
         log("console_patch_applied", { phase: "bootstrap" });
       } catch (e) {
@@ -198,7 +198,7 @@ async function ensureConsolePatch(view: BunMotView, state: BridgeState): Promise
   if (!state.bootstrappedAtLeastOnce) return;
   // navigation / reload 復旧用。失敗してもメインコマンド実行は継続。
   try {
-    await view.rpc.request.evaluateJavascriptWithResponse(buildEnsurePatchScript());
+    await view.rpc.request.evaluateJavascriptWithResponse({ script: buildEnsurePatchScript() });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log("console_patch_ensure_failed", { message });
@@ -269,7 +269,7 @@ async function dispatchCommand(cmd: CommandRequest, view: BunMotView): Promise<u
   let scriptPromise: Promise<unknown>;
   try {
     const script = buildScriptForCommand(cmd);
-    scriptPromise = view.rpc.request.evaluateJavascriptWithResponse(script);
+    scriptPromise = view.rpc.request.evaluateJavascriptWithResponse({ script });
   } catch (e) {
     throw new InternalDispatchError(e);
   }

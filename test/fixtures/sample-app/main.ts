@@ -11,12 +11,18 @@ const port = Number(process.env["BUN_MOT_PORT"] ?? "0");
 const dummyView: BunMotView = {
   rpc: {
     request: {
-      // 最小スタブ: 受け取った script を eval する。
+      // 最小スタブ: Electrobun 1.16 builtin の `evaluateJavascriptWithResponse` と同じ
+      // `new Function(script)()` 経路で実行する (api/browser/index.ts:142 と等価)。
       // scripts.ts 由来の document.querySelector を含む script は ReferenceError で reject され、
       // bridge 側で `evaluation_error` に分類される (本フィクスチャのスコープ外)。
-      evaluateJavascriptWithResponse: async (script: string): Promise<unknown> => {
-        // eslint-disable-next-line no-eval
-        return eval(script);
+      evaluateJavascriptWithResponse: async ({
+        script,
+      }: {
+        script: string;
+      }): Promise<unknown> => {
+        const fn = new Function(script);
+        const result = fn();
+        return result instanceof Promise ? await result : result;
       },
     },
   },

@@ -8,21 +8,22 @@ import type { BunMotView } from "../src/types";
 const view: BunMotView = {
   rpc: {
     request: {
-      evaluateJavascriptWithResponse: async (script: string): Promise<unknown> => {
-        // 簡易 mock: evaluate なら eval (※検証用、本番では使わない)
-        if (script.startsWith("new Promise")) {
-          // waitForSelector / getText の Promise script は WebView 環境がないと動かないので
-          // 検証では simple resolve を返す
-          if (script.includes("__BUNMOT_TIMEOUT__")) {
-            return { found: true };
-          }
-          if (script.includes("textContent")) {
-            return { text: "mock-text" };
-          }
+      evaluateJavascriptWithResponse: async ({
+        script,
+      }: {
+        script: string;
+      }): Promise<unknown> => {
+        // 簡易 mock: scripts.ts は `return new Promise(...)` 形で来る (issue #1)。
+        // WebView 環境がないと実行できないので、典型ケースのみ short-circuit する。
+        if (script.includes("__BUNMOT_TIMEOUT__")) {
+          return { found: true };
+        }
+        if (script.includes("textContent")) {
+          return { text: "mock-text" };
         }
         try {
-          // 危険: 検証用のみ
-          return Function("return " + script)();
+          // 危険: 検証用のみ。Electrobun 1.16 と同じく new Function(script)() で実行。
+          return new Function(script)();
         } catch (e) {
           throw e;
         }
