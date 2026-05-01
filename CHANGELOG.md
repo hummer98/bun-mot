@@ -17,15 +17,15 @@
 - `mado` 連携 (`scripts/smoke-mado.ts`, `docs/mado-integration.md`, README §「mado 連携の実例」, `mado:smoke` script) を削除。bun-mot は単体プロジェクトとして公開
 - ルート `.gitignore` に `.team/` および `.worktrees/` を追加 (multi-agent orchestration の作業ディレクトリ)
 
-### TODO (publish 前にユーザー確認)
+### Notes (運用)
 
-- npmjs.com で `bun-mot` を Trusted Publisher として登録 (`hummer98/bun-mot` / workflow `release.yml`)
-- 初版 `v0.1.0` のみ Manual Token 経由でローカル publish (Trusted Publisher は publish 後に登録可能なため)
-- 以降は `/release` で CI 経由の OIDC publish
+- v0.1.0 は 2026-05-01 に Manual Token + 2FA でローカル publish 済み (https://www.npmjs.com/package/bun-mot/v/0.1.0)
+- 以降のバージョンは npmjs.com で **Trusted Publisher** (`hummer98/bun-mot` / workflow `release.yml`) を登録した後、`/release` でタグ push → CI が OIDC で自動 publish
+- v0.1.0 のみ provenance attestation なし (ローカル publish のため)。v0.1.1 以降は CI publish なので provenance 付き
 
 ## [0.1.0] - 2026-05-01
 
-初版公開準備リリース。`npm publish --dry-run` までを通すための実装。
+初版公開リリース。npm registry にて `bun-mot@0.1.0` として公開 (Manual Token 経由のローカル publish、provenance attestation なし)。
 
 ### Added
 
@@ -52,7 +52,8 @@
 
 ### Notes
 
-- 本リリースは `npm publish --dry-run` 段階までで停止しており、実 publish はユーザー承認待ち
+- 2026-05-01 に v0.1.0 を npm に publish 済み (https://www.npmjs.com/package/bun-mot/v/0.1.0)
+- Trusted Publisher (`release.yml` 経由の OIDC publish) は v0.1.0 公開後に npmjs.com 側で登録する設計
 
 [Unreleased]: https://github.com/hummer98/bun-mot/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/hummer98/bun-mot/releases/tag/v0.1.0
